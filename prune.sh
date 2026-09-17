@@ -1,6 +1,7 @@
 #!/bin/sh
 # Prune the official Hermes image down to the Railway dashboard + gateway
-# runtime. The result is flattened into a fresh stage by Dockerfile.
+# runtime, align HOME with this template's HERMES_HOME layout, and verify
+# the result. The pruned tree is flattened into a fresh stage by Dockerfile.
 #
 #   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
 #
@@ -117,16 +118,40 @@ find /opt/hermes -xdev \
 # Remove Python bytecode caches anywhere else in the runtime tree as well.
 find / -xdev -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
+# --- HOME alignment for this template's data layout ------------------------
+# This template sets HERMES_HOME=/data/.hermes, but upstream v2026.9.14
+# hard-codes HOME=/opt/data in the dashboard s6 service and in the main
+# program wrapper. Left unpatched, HOME-anchored state (git config, .netrc,
+# provider SDK config, XDG state) would land in the non-persistent /opt/data
+# skeleton instead of the mounted volume. Re-point both at $HERMES_HOME;
+# the upstream stage2 hook guarantees $HERMES_HOME exists (root mkdir -p)
+# before any supervised process starts. Fail loudly if the upstream lines
+# drift so a version bump is caught at build time.
+for f in /etc/s6-overlay/s6-rc.d/dashboard/run /opt/hermes/docker/main-wrapper.sh; do
+    grep -q '^export HOME=/opt/data$' "$f" || {
+        echo "ERROR: HOME line not found in $f — update this patch for the pinned Hermes release" >&2
+        exit 1
+    }
+    grep -q '^cd /opt/data$' "$f" || {
+        echo "ERROR: cwd line not found in $f — update this patch for the pinned Hermes release" >&2
+        exit 1
+    }
+    sed -i 's|^export HOME=/opt/data$|export HOME="$HERMES_HOME"|' "$f"
+    sed -i 's|^cd /opt/data$|cd "$HERMES_HOME"|' "$f"
+done
+echo "  patched: HOME aligned to \$HERMES_HOME (dashboard/run + main-wrapper)"
+
 after=$(du -sm / 2>/dev/null | cut -f1)
 echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER})"
 
 # --- Verify the pruned tree still works -----------------------------------
-# Use a throwaway HOME so the root build user cannot create root-owned Hermes
-# state in /opt/data. Imports catch missing Python assets; the HTTP smoke test
-# below verifies the actual dashboard can start and answer a health request.
+# Use a throwaway HERMES_HOME so the root build user cannot create root-owned
+# Hermes state in the image's /data volume mountpoint. Imports catch missing
+# Python assets; the HTTP smoke test below verifies the actual dashboard can
+# start and answer a health request.
 HERMES_HOME=/tmp/prune-verify-home \
 HERMES_WRITE_SAFE_ROOT=/tmp/prune-verify-home \
-HERMES_DASHBOARD_FILES_ROOT=/opt/data \
+HERMES_DASHBOARD_FILES_ROOT=/ \
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=verify \
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=verify-password \
 /opt/hermes/.venv/bin/python3 - <<'PY'
@@ -160,7 +185,7 @@ PY
 
 HERMES_HOME=/tmp/prune-verify-home \
 HERMES_WRITE_SAFE_ROOT=/tmp/prune-verify-home \
-HERMES_DASHBOARD_FILES_ROOT=/opt/data \
+HERMES_DASHBOARD_FILES_ROOT=/ \
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=verify \
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=verify-password \
 /opt/hermes/.venv/bin/hermes dashboard --host 127.0.0.1 --port 19119 --no-open >/tmp/hermes-dashboard-smoke.log 2>&1 &
@@ -197,13 +222,16 @@ trap - EXIT
 
 rm -rf /tmp/prune-verify-home
 
-# Guard the guard: importing/verifying Hermes must not leave persistent state in
-# the image's data-volume mountpoint.
-stray=$(find /opt/data -mindepth 1 ! -name '.bashrc' ! -name '.profile' \
-        ! -name '.bash_logout' -print 2>/dev/null | head -5)
+# Guard the guard: importing/verifying Hermes must not leave persistent
+# state in the image's data-volume mountpoint. This template mounts its
+# volume at /data (HERMES_HOME=/data/.hermes lives inside it); upstream
+# creates nothing under /data, and the smoke test above ran with a
+# throwaway HERMES_HOME under /tmp — so /data must not exist (or be empty)
+# in the pruned image.
+stray=$(find /data -mindepth 1 -print 2>/dev/null | head -5)
 if [ -n "$stray" ]; then
-    echo "ERROR: root-owned state baked into /opt/data:" >&2
+    echo "ERROR: state baked into the /data volume mountpoint:" >&2
     echo "$stray" >&2
     exit 1
 fi
-echo "prune verify: /opt/data clean"
+echo "prune verify: /data clean"

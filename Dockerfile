@@ -40,12 +40,12 @@ ENV PYTHONUNBUFFERED=1 \
     npm_config_install_links=false \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
-    HERMES_HOME=/opt/data \
-    HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp \
-    HERMES_DASHBOARD_FILES_ROOT=/opt/data \
+    HERMES_HOME=/data/.hermes \
+    HERMES_WRITE_SAFE_ROOT=/data \
+    HERMES_DASHBOARD_FILES_ROOT=/ \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages \
-    PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    HERMES_LAZY_INSTALL_TARGET=/data/lazy-packages \
+    PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # HERMES_WEB_DIST is load-bearing after pruning the web source tree: it makes
 # the dashboard serve the prebuilt SPA instead of attempting a boot-time

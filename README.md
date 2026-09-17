@@ -15,7 +15,7 @@ The template adds:
 - a pinned Hermes release for reproducible builds;
 - Railway `PORT` handling;
 - the built-in Hermes dashboard on the Railway public port;
-- persistent Hermes state at `/opt/data`;
+- persistent Hermes state at `/data/.hermes` (Railway volume mounted at `/data`);
 - browser automation is disabled by default;
 - image pruning for build-time files and unused development content;
 - build-time SQLite compatibility and runtime dashboard smoke checks;
@@ -77,22 +77,24 @@ Can be set in Hermes's dashboard after deploy.
 | Variable | Required | Description |
 |---|---|---|
 | `PORT` | No | Injected by Railway automatically — do not set manually. Validated and mapped to `HERMES_DASHBOARD_PORT`. |
-| `HERMES_HOME` | No | Persistent data dir (default `/opt/data` — already set, volume mount point). |
+| `HERMES_HOME` | No | Persistent data dir. This template sets it to `/data/.hermes`, inside the volume mounted at `/data`. |
 | `HERMES_DASHBOARD` | No | Set `1` to enable dashboard (already set in Dockerfile). |
 | `KEEP_BROWSER` | Optional | Build-time arg only (`0` = minimal ~1.1GB, `1` = with Chromium). Not a runtime variable. |
 
 > Hermes also supports OAuth/OIDC. Current upstream documentation recommends OAuth/OIDC for direct public-internet exposure, while Basic Auth is the simple built-in login mechanism used by this template.
 
 ### 3. Add persistent storage (Recommended)
-On the free tier, attaching a Railway Volume at `/opt/data` gives you 1 GB of storage instead of the default 0.5 GB. <b>Without a volume your Hermes data is not persistent</b> — it is lost on every redeploy — so you would need to back your files up manually or with a cron job.
+On the free tier, attaching a Railway Volume at `/data` gives you 1 GB of storage instead of the default 0.5 GB. <b>Without a volume your Hermes data is not persistent</b> — it is lost on every redeploy — so you would need to back your files up manually or with a cron job.
 
 Attach a Railway Volume at:
 
 ```text
-/opt/data
+/data
 ```
 
-`/opt/data` is Hermes' persistent `HERMES_HOME` in the official container. It is the correct location for the Railway Volume and is used by Hermes for configuration, credentials, sessions, memories, skills, logs, cron state, profiles, and other persistent runtime data. The upstream dashboard service also resets `HOME` to `/opt/data` before dropping privileges to the `hermes` user.
+This template moves Hermes' persistent `HERMES_HOME` to `/data/.hermes`, inside that volume. Configuration, credentials, sessions, memories, skills, logs, cron state, profiles, and other persistent runtime data all live there. Unlike the official container (where `HERMES_HOME` is `/opt/data`), the volume mount point and the Hermes home are different paths: the boot-time setup hook creates and chowns `HERMES_HOME` as root before any supervised process starts, so a fresh empty volume is bootstrapped on first boot. The template also patches the upstream dashboard service and main-program wrapper to reset `HOME` to `$HERMES_HOME` (upstream hard-codes `/opt/data`), so HOME-anchored state lands on the volume too.
+
+Note: lazy dependency installs are disabled (`HERMES_DISABLE_LAZY_INSTALLS=1`) and their target is `/data/lazy-packages`. If you re-enable them via Hermes config, that directory must be writable by the `hermes` user.
 
 ### 4. Configure Hermes
 
@@ -136,16 +138,16 @@ The health endpoint is a read-only dashboard health endpoint intended for servic
 The dashboard filesystem scope is restricted to:
 
 ```text
-/opt/data
+/
 ```
 
 The agent's general write safety root is:
 
 ```text
-/opt/data:/tmp
+/data
 ```
 
-This keeps dashboard-managed filesystem access aligned with Hermes' persistent data area rather than exposing the entire container filesystem.
+The write safety root keeps the agent's `write_file`/`patch` tools confined to the mounted data volume. Note that `HERMES_DASHBOARD_FILES_ROOT=/` is an intentional choice in this template: the dashboard file browser can reach the entire container filesystem (including the read-only `/opt/hermes` install tree). If you want the dashboard to see only persistent state, set it to `/data/.hermes` in the Dockerfile.
 
 Keep dashboard credentials in Railway's secret environment variables. For Basic Auth, also set `HERMES_DASHBOARD_BASIC_AUTH_SECRET` so sessions remain valid across restarts. Hermes documents that omitting this secret generates a new per-process signing key and logs users out after a restart.
 
@@ -168,7 +170,8 @@ The Docker build performs several checks before producing the final image:
 1. verifies the SQLite version is at least `3.51.3`;
 2. validates retained Hermes Python modules and runtime assets;
 3. starts the dashboard locally and verifies `/api/health` returns HTTP 200;
-4. confirms that the build-time verification did not leave state in `/opt/data`.
+4. aligns `HOME` in the upstream dashboard service and main-program wrapper with `HERMES_HOME` (failing the build if the upstream lines drift);
+5. confirms that the build-time verification did not leave state in `/data`.
 
 These checks are intentionally performed before the pruned image is flattened so a broken pruning change fails the build instead of reaching Railway.
 
@@ -194,8 +197,8 @@ Dashboard          Gateway
    │                 │
    └──────┬──────────┘
           ▼
-     /opt/data
-     HERMES_HOME
+     /data/.hermes
+     HERMES_HOME (volume: /data)
 ```
 
 The entrypoint dispatcher is kept intact because Hermes uses it to preserve normal s6-overlay PID-1 startup while also supporting runtimes where the image entrypoint is not PID 1.
@@ -206,7 +209,7 @@ When upgrading Hermes:
 
 1. change `HERMES_IMAGE` to the new released Hermes tag;
 2. review the upstream Docker/runtime changes;
-3. validate every pruning rule against the new image;
+3. validate every pruning rule and the HOME-alignment patch in `prune.sh` against the new image (it fails the build if the patched lines drift);
 4. rebuild the image;
 5. run the dashboard and browser-enabled smoke tests;
 6. deploy the updated image to Railway.
@@ -215,20 +218,27 @@ Do not switch back to `latest` unless you are intentionally accepting unreviewed
 
 ## Changelog
 
+### Data root moved to `/data` (layout change)
+
+- `HERMES_HOME` moved from `/opt/data` to `/data/.hermes`; the Railway Volume mount point is now `/data`.
+- `HERMES_WRITE_SAFE_ROOT` is now `/data`; `HERMES_DASHBOARD_FILES_ROOT` is now `/` (the dashboard file browser can reach the whole container filesystem); `HERMES_LAZY_INSTALL_TARGET` moved to `/data/lazy-packages`; the user-local `PATH` entry moved to `/data/.local/bin`.
+- `prune.sh` now patches the upstream `s6-rc.d/dashboard/run` service and `docker/main-wrapper.sh` to set `HOME` to `$HERMES_HOME` (upstream v2026.9.14 hard-codes `/opt/data`), so HOME-anchored state persists on the volume. The patch fails the build if the upstream lines change.
+- The build-time clean-data guard now checks the `/data` volume mountpoint instead of `/opt/data`.
+
 ### v2026.9.14 (Hermes v0.21.3)
 
 - Re-pinned the upstream image from `v2026.8.31` to `v2026.9.14`.
 - Verified against the new tag: the upstream Dockerfile diff is only the baked-in `google-chat` Python extra, so the base image (Debian 13.4, Python 3.13, Node 26, s6-overlay 3.2.3.0), the `/opt/hermes` layout, the `docker/entrypoint-dispatch.sh` + `main-wrapper.sh` + `s6-rc.d` supervision contract, and the dashboard runtime (including `HERMES_DASHBOARD_PORT` and the `HERMES_DASHBOARD_BASIC_AUTH_*` provider) are unchanged. All `prune.sh` rules, module-import checks, and `must`-list assets were re-verified against the new tag; no prune rule needed changes (`/opt/hermes/mcp-research-data` no longer exists upstream, so that rule is now a defensive no-op).
 - Fixed the free-tier storage wording in the persistence section.
 
-Persistent data under `/opt/data` remains separate from the immutable application image, so replacing the image does not replace the attached Railway Volume.
+Persistent data under `/data` remains separate from the immutable application image, so replacing the image does not replace the attached Railway Volume.
 
 ## Project files
 
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Pins Hermes, performs the two-stage prune/flatten build, and defines the Railway runtime. |
-| `prune.sh` | Removes build-only content and verifies the pruned Hermes runtime. |
+| `prune.sh` | Removes build-only content, aligns `HOME` with `HERMES_HOME`, and verifies the pruned Hermes runtime. |
 | `railway-entrypoint.sh` | Validates Railway `PORT`, maps it to Hermes, and delegates to Hermes' dispatcher. |
 | `railway.json` | Defines Railway health-check and restart behavior. |
 | `README.md` | Canonical deployment, configuration, architecture, and maintenance guide. |
