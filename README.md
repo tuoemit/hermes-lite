@@ -1,6 +1,6 @@
 # Hermes-lite
 <b>Hermes agent on railway.</b>
-Optimized for free tire railway limitations.
+Optimized for free tier Railway limitations.
 
 Deploy the official [Hermes Agent](https://github.com/NousResearch/hermes-agent) container on Railway.
 
@@ -84,7 +84,7 @@ Can be set in Hermes's dashboard after deploy.
 > Hermes also supports OAuth/OIDC. Current upstream documentation recommends OAuth/OIDC for direct public-internet exposure, while Basic Auth is the simple built-in login mechanism used by this template.
 
 ### 3. Add persistent storage (Recommended)
-On a free tire railway if you dont set it you'll get 1GB of storage instead of 0.5GB <b>but your Hermes data will not be persistent</b>. and you need to backup your files manually or use a cron job.
+On the free tier, attaching a Railway Volume at `/opt/data` gives you 1 GB of storage instead of the default 0.5 GB. <b>Without a volume your Hermes data is not persistent</b> — it is lost on every redeploy — so you would need to back your files up manually or with a cron job.
 
 Attach a Railway Volume at:
 
@@ -154,7 +154,7 @@ Keep dashboard credentials in Railway's secret environment variables. For Basic 
 The template pins the upstream image to a released Hermes version:
 
 ```dockerfile
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.8.31
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.9.14
 ```
 
 This is deliberate. The pruning rules and build-time verification depend on the filesystem and runtime contract of the pinned Hermes release. Upgrade Hermes by changing the pinned release intentionally, then rebuild and test the template before deploying it.
@@ -212,6 +212,14 @@ When upgrading Hermes:
 6. deploy the updated image to Railway.
 
 Do not switch back to `latest` unless you are intentionally accepting unreviewed upstream filesystem and runtime changes.
+
+## Changelog
+
+### v2026.9.14 (Hermes v0.21.3)
+
+- Re-pinned the upstream image from `v2026.8.31` to `v2026.9.14`.
+- Verified against the new tag: the upstream Dockerfile diff is only the baked-in `google-chat` Python extra, so the base image (Debian 13.4, Python 3.13, Node 26, s6-overlay 3.2.3.0), the `/opt/hermes` layout, the `docker/entrypoint-dispatch.sh` + `main-wrapper.sh` + `s6-rc.d` supervision contract, and the dashboard runtime (including `HERMES_DASHBOARD_PORT` and the `HERMES_DASHBOARD_BASIC_AUTH_*` provider) are unchanged. All `prune.sh` rules, module-import checks, and `must`-list assets were re-verified against the new tag; no prune rule needed changes (`/opt/hermes/mcp-research-data` no longer exists upstream, so that rule is now a defensive no-op).
+- Fixed the free-tier storage wording in the persistence section.
 
 Persistent data under `/opt/data` remains separate from the immutable application image, so replacing the image does not replace the attached Railway Volume.
 

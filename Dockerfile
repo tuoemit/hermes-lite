@@ -8,7 +8,7 @@
 # fresh image so the removed bytes do not remain in parent layers.
 # ============================================================================
 
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.8.31
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.9.14
 
 # ---------------------------------------------------------------------------
 # Stage 1 — prune the official Hermes image.
