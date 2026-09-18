@@ -59,6 +59,12 @@ ENV HERMES_DASHBOARD=1 \
 WORKDIR /opt/hermes
 EXPOSE 9119
 
+# The persistent data root (HERMES_HOME=/data/.hermes lives inside it). On
+# Railway the volume is attached via the UI at /data; this declaration keeps
+# `docker run` / compose users on the same contract. Data is ephemeral by
+# design when no volume is attached.
+VOLUME ["/data"]
+
 COPY --chmod=0755 railway-entrypoint.sh /railway-entrypoint.sh
 ENTRYPOINT [ "/railway-entrypoint.sh" ]
 CMD [ "gateway", "run" ]

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Bridge Railway's dynamic PORT to Hermes' dashboard port, then delegate to
-# Hermes' own entrypoint dispatcher.
+# Bridge Railway's dynamic PORT to Hermes' dashboard port, preflight the
+# dashboard auth contract, and delegate to Hermes' own entrypoint dispatcher.
 set -eu
 
 : "${PORT:=9119}"
@@ -20,6 +20,48 @@ fi
 # Railway's PORT is authoritative. Allowing a separate dashboard port causes
 # Railway's health probe and Hermes to disagree about where the service lives.
 export HERMES_DASHBOARD_PORT="$PORT"
+
+# --- Dashboard auth preflight ------------------------------------------------
+# The dashboard binds 0.0.0.0 on Railway's public port, so upstream's auth
+# gate is engaged and REQUIRES a registered provider (HERMES_DASHBOARD_INSECURE
+# no longer disables it). Without a provider the dashboard service fails
+# closed, nothing answers /api/health, and Railway crash-loops with no
+# actionable error in the logs. Fail fast here instead.
+basic_ok=0
+if [ -n "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ] && [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ]; then
+    basic_ok=1
+fi
+oauth_ok=0
+if [ -n "${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}" ]; then
+    oauth_ok=1
+fi
+case "${HERMES_DASHBOARD:-1}" in
+    0|false|FALSE|no|NO)
+        basic_ok=-1
+        echo "[railway-entrypoint] dashboard disabled; skipping auth preflight"
+        ;;
+    *)
+        if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ]; then
+            echo "ERROR: the dashboard is public but no auth provider is configured." >&2
+            echo "       Set HERMES_DASHBOARD_BASIC_AUTH_USERNAME and HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" >&2
+            echo "       (recommended: also HERMES_DASHBOARD_BASIC_AUTH_SECRET so sessions survive" >&2
+            echo "       restarts), or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for OAuth/OIDC." >&2
+            exit 2
+        fi
+        ;;
+esac
+
+# Startup banner for Railway log triage: the values that matter at a glance.
+if [ "$basic_ok" = 1 ]; then
+    auth_label="basic"
+elif [ "$basic_ok" = -1 ]; then
+    auth_label="disabled"
+else
+    auth_label="oauth"
+fi
+browser_label="off"
+[ -d /opt/hermes/.playwright ] && browser_label="on"
+echo "[railway-entrypoint] PORT=$PORT HERMES_DASHBOARD_PORT=$HERMES_DASHBOARD_PORT HERMES_HOME=${HERMES_HOME:-} auth_provider=$auth_label browser=$browser_label"
 
 # Delegate to the upstream dispatcher rather than /init directly. The
 # dispatcher preserves Hermes' normal s6-overlay PID-1 path and its wrapped-

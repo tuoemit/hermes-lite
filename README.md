@@ -15,10 +15,12 @@ The template adds:
 - a pinned Hermes release for reproducible builds;
 - Railway `PORT` handling;
 - the built-in Hermes dashboard on the Railway public port;
-- persistent Hermes state at `/data/.hermes` (Railway volume mounted at `/data`);
+- Hermes state at `/data/.hermes` — ephemeral by design, optional Railway volume at `/data` for persistence;
+- HOME aligned to the template's data layout (static s6 scripts patched at build time + a `/opt/data` → `/data/.hermes` compatibility symlink that also covers s6 scripts generated at runtime);
 - browser automation is disabled by default;
-- image pruning for build-time files and unused development content;
-- build-time SQLite compatibility and runtime dashboard smoke checks;
+- aggressive image pruning (build toolchain, GUI/X11 stack, dev trees) sized for the free tier;
+- build-time SQLite compatibility, a shared-library integrity sweep, and a gated dashboard + TUI bundle smoke check;
+- a fail-fast dashboard auth preflight in the entrypoint;
 - Railway health checks at `/api/health`.
 
 The container continues to use Hermes' own s6-overlay supervision and entrypoint dispatcher. No custom gateway supervisor, runtime Git update, or separate dashboard proxy is introduced.
@@ -83,16 +85,15 @@ Can be set in Hermes's dashboard after deploy.
 
 > Hermes also supports OAuth/OIDC. Current upstream documentation recommends OAuth/OIDC for direct public-internet exposure, while Basic Auth is the simple built-in login mechanism used by this template.
 
-### 3. Add persistent storage (Recommended)
-On the free tier, attaching a Railway Volume at `/data` gives you 1 GB of storage instead of the default 0.5 GB. <b>Without a volume your Hermes data is not persistent</b> — it is lost on every redeploy — so you would need to back your files up manually or with a cron job.
+### 3. Storage (ephemeral by default)
+This template is designed to run on the free tier <b>without a volume</b>. All Hermes state — configuration, credentials, sessions, memories, skills, logs, cron state — lives in `HERMES_HOME=/data/.hermes`, which is recreated from scratch on every deploy or container recreate. The boot-time setup hook (`stage2-hook`) runs `mkdir -p` + chown as root before any supervised process starts, so a fresh boot is always self-contained.
 
-Attach a Railway Volume at:
+What that means in practice:
 
-```text
-/data
-```
+- bot token, model provider keys, and dashboard credentials should come from **Railway environment variables** (they survive redeploy);
+- anything configured inside the dashboard (sessions, memories, skills, cron jobs, profile data) **resets on every deploy** — that is the intended free-tier trade-off, and the dashboard can re-configure everything quickly.
 
-This template moves Hermes' persistent `HERMES_HOME` to `/data/.hermes`, inside that volume. Configuration, credentials, sessions, memories, skills, logs, cron state, profiles, and other persistent runtime data all live there. Unlike the official container (where `HERMES_HOME` is `/opt/data`), the volume mount point and the Hermes home are different paths: the boot-time setup hook creates and chowns `HERMES_HOME` as root before any supervised process starts, so a fresh empty volume is bootstrapped on first boot. The template also patches the upstream dashboard service and main-program wrapper to reset `HOME` to `$HERMES_HOME` (upstream hard-codes `/opt/data`), so HOME-anchored state lands on the volume too.
+If you ever want persistence, attach a Railway Volume at `/data` — the data root is already inside it, nothing else changes (on the free tier this also raises storage from 0.5 GB to 1 GB).
 
 Note: lazy dependency installs are disabled (`HERMES_DISABLE_LAZY_INSTALLS=1`) and their target is `/data/lazy-packages`. If you re-enable them via Hermes config, that directory must be writable by the `hermes` user.
 
@@ -102,18 +103,18 @@ Open the Railway public URL, sign in, and finish the Hermes setup. Configure you
 
 ## Browser automation
 
-Browser automation is **disabled by default** in this optimized template for Railway's free tier (saves storage and it won't work correctly with 0.5GB of RAM). This is the cleanest setup.
+Browser automation is **disabled by default** (`KEEP_BROWSER=0`) because it does not work reliably on Railway's free tier. The math:
 
-- Default: `KEEP_BROWSER=0` — no Playwright/Chromium, minimal disk/RAM, fastest cold start.
-- All 20 platforms (including Telegram) and dashboard remain fully functional.
+- **RAM (0.5 GB cap):** the gateway (typically 200–400 MB under active Telegram load) + the dashboard (100–200 MB) already fill the budget. Chromium's headless shell adds ~150–300 MB per active page session. Once the cgroup OOM-kills, the victim is usually the *gateway* — i.e. your bot goes offline while the container restart-loops.
+- **Disk (0.5 GB without a volume):** the browser stack (Chromium headless shell + fonts + GUI libraries) adds roughly 450–600 MB on top of an image that already sits near the free-tier quota.
 
-To enable browser automation, build with:
+The "can it technically boot?" answer is yes; "can it browse while the bot is serving?" on 0.5 GB is effectively no. Enabling it by default would put the primary workload (the Telegram bot) at risk, so the default stays `0`.
+
+To enable it, move the service to a plan with at least ~2 GB RAM and build with:
 
 ```text
 KEEP_BROWSER=1
 ```
-
-Browser workloads need more memory than a messaging-only deployment. Size the Railway service accordingly if you enable it.
 
 ## Dashboard and Chat
 
@@ -169,9 +170,11 @@ The Docker build performs several checks before producing the final image:
 
 1. verifies the SQLite version is at least `3.51.3`;
 2. validates retained Hermes Python modules and runtime assets;
-3. starts the dashboard locally and verifies `/api/health` returns HTTP 200;
-4. aligns `HOME` in the upstream dashboard service and main-program wrapper with `HERMES_HOME` (failing the build if the upstream lines drift);
-5. confirms that the build-time verification did not leave state in `/data`.
+3. loads the prebuilt TUI bundle (the dashboard Chat tab's runtime) and verifies it is intact;
+4. starts the dashboard bound to `0.0.0.0` — the same non-loopback bind production uses, so the production auth gate (provider required, fail-closed) is exercised — and verifies `/api/health` returns HTTP 200;
+5. aligns `HOME` in the upstream dashboard service and main-program wrapper with `HERMES_HOME`, and links `/opt/data` → `/data/.hermes` (failing the build if the upstream lines drift);
+6. runs a shared-library integrity sweep (`ldd` over the interpreters, the Node toolchain, and every venv native extension) so an over-aggressive prune fails the build instead of breaking at runtime;
+7. confirms that the build-time verification did not leave state in `/data`.
 
 These checks are intentionally performed before the pruned image is flattened so a broken pruning change fails the build instead of reaching Railway.
 
@@ -203,6 +206,30 @@ Dashboard          Gateway
 
 The entrypoint dispatcher is kept intact because Hermes uses it to preserve normal s6-overlay PID-1 startup while also supporting runtimes where the image entrypoint is not PID 1.
 
+### Runtime topology (what actually runs where)
+
+It is worth knowing, because it shapes how the logs look:
+
+- The container's main program is `hermes gateway run`, but under s6 supervision Hermes **redirects it**: the gateway is started as the s6 service slot `gateway-default` (registered at boot by the image's profile reconciliation), and the main program process becomes a tiny `sleep infinity` heartbeat that keeps the container alive.
+- The **dashboard** runs as its own s6 service on `PORT`; the **gateway** (Telegram, cron, everything messaging) runs under `s6-supervise gateway-default`.
+- s6 auto-restarts a crashed gateway without restarting the container, so gateway flaps do not show up as Railway restarts.
+- On container stop (redeploy, `railway stop`, health-check-triggered restart), s6's stage-3 shutdown sends SIGTERM to every service. The gateway then logs `Shutdown context: signal=SIGTERM ... parent_cmdline='s6-supervise gateway-default'` (WARNING level) and sometimes a `--- Logging error ---` line from the Python logging teardown. **Both are normal shutdown noise, not errors** — see Troubleshooting.
+
+## Troubleshooting
+
+**`Shutdown context: signal=SIGTERM ... s6-supervise gateway-default` + `--- Logging error ---`**
+Normal, expected output on container stop/restart (see Runtime topology). The gateway's shutdown forensics WARNING plus a Python logging-teardown artifact. Not an error by itself — look at *why* the container stopped (redeploy, health check, or OOM). The same line embeds `loadavg_1m=...`: if that number is large (tens, on a free-tier service), the container was overloaded at the moment of the kill — that is a capacity problem, not a template problem.
+
+**Container restart-looping**
+1. Check the Railway logs for the entrypoint banner (`[railway-entrypoint] PORT=... auth_provider=...`) — if the container dies before it, the cause is image/cold-start; if you see `ERROR: the dashboard is public but no auth provider is configured`, set the Basic Auth variables (the entrypoint now fails fast with an actionable message instead of a silent loop).
+2. Check Railway's memory usage against the 0.5 GB cap — repeated OOM kills are the classic free-tier loop. The gateway also writes a heavyweight diagnostic (`ps` tree, dmesg) to `$HERMES_HOME/logs/gateway-shutdown-diag.log` on each unexpected signal — on an ephemeral deploy read it *before* the next restart wipes it (dashboard file browser, or `railway logs` timing).
+
+**Dashboard up, but the bot/messaging is dark**
+The `gateway-default` s6 slot can end in a *permanent-failure* state (upstream exit-code 125 mapping: s6 stops restarting). The container and dashboard keep running; messaging does not. Check the reconcile log under `/data/.hermes/`, then start it from a shell: `hermes gateway start` (no `-p` targets the root profile slot). This is also the state you can land in after a redeploy with `gateway_state.json` in a transitional value — a fresh start usually self-heals because the boot reconciliation treats legacy `gateway run` containers as "running".
+
+**Free-tier reality check (capacity)**
+Budget honestly: 0.5 GB RAM shared by gateway + dashboard + whatever the bot is doing (model calls, cron, image processing). Sustained `loadavg_1m` in the double digits means the service is already thrashing; expect slow health probes, dropped Telegram updates, and OOM kills. Fixes, in order of preference: reduce concurrent work (platforms, cron frequency, heavy skills), then move the service to a paid Railway plan (≥ 2 GB RAM if browser automation is ever wanted). Nothing in the template can buy RAM back.
+
 ## Updating the template
 
 When upgrading Hermes:
@@ -217,6 +244,16 @@ When upgrading Hermes:
 Do not switch back to `latest` unless you are intentionally accepting unreviewed upstream filesystem and runtime changes.
 
 ## Changelog
+
+### Audit round 2 (hardening + free-tier optimization)
+
+- **Fixed the real HOME split:** the live gateway is the s6 slot `gateway-default`, whose run script is *generated at runtime* with hard-coded `HOME=/opt/data` — unreachable by any static patch. The template now replaces the `/opt/data` home skeleton with a symlink to `/data/.hermes`, so every current and future `/opt/data` reference (static scripts, generated scripts, HOME fallbacks) lands in the template's data root.
+- **Fail-fast dashboard auth preflight** in `railway-entrypoint.sh`: a public dashboard without Basic Auth or OAuth now exits with an actionable error at boot instead of silently crash-looping against the health check.
+- **Build validation hardened:** the dashboard smoke test now binds `0.0.0.0` (exercising the production auth gate, fail-closed); a TUI bundle load probe covers the Chat-tab runtime; a shared-library integrity sweep (`ldd` over interpreters, Node, and all venv native extensions) makes aggressive pruning provably safe.
+- **Prune deepened:** C frontends/binutils/`make`/the entire `/usr/include` tree and pkgconfig are now removed (compiler backends were already gone, so these were dead weight); the Playwright GUI/X11 client libraries (NSS, ATK, Pango, Cairo, Cups, X11, GBM/DRM, ALSA data, GL/EGL/GLX) are removed with `KEEP_BROWSER=0`; dev-only trees (`apps/`, `scripts/`, installer shims, lint configs) are removed; version-pinned paths converted to globs.
+- **Ops:** `VOLUME ["/data"]` declared; entrypoint startup banner; restart policy `ON_FAILURE` → `ALWAYS` (a public service should come back after repeated OOMs instead of going dark after 5 retries); new Runtime-topology, Troubleshooting, and free-tier capacity sections.
+- Storage section reframed: the template's primary mode is **ephemeral, no-volume** (data resets per deploy; secrets belong in Railway env vars); a volume at `/data` remains the opt-in persistence path.
+- Browser default stays `0`: free-tier RAM/disk math documented (gateway + dashboard + Chromium cannot coexist under 0.5 GB; OOM would take the bot down).
 
 ### Data root moved to `/data` (layout change)
 
@@ -238,9 +275,9 @@ Persistent data under `/data` remains separate from the immutable application im
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Pins Hermes, performs the two-stage prune/flatten build, and defines the Railway runtime. |
-| `prune.sh` | Removes build-only content, aligns `HOME` with `HERMES_HOME`, and verifies the pruned Hermes runtime. |
-| `railway-entrypoint.sh` | Validates Railway `PORT`, maps it to Hermes, and delegates to Hermes' dispatcher. |
-| `railway.json` | Defines Railway health-check and restart behavior. |
+| `prune.sh` | Removes build-only content (toolchain, GUI/X11 stack, dev trees), aligns `HOME` with `HERMES_HOME`, and verifies the pruned runtime (imports, TUI bundle, gated dashboard smoke test, shared-library sweep, clean `/data`). |
+| `railway-entrypoint.sh` | Validates Railway `PORT`, preflights the dashboard auth contract (fail-fast), logs a startup banner, and delegates to Hermes' dispatcher. |
+| `railway.json` | Defines Railway health-check (`/api/health`) and restart behavior (`ALWAYS`). |
 | `README.md` | Canonical deployment, configuration, architecture, and maintenance guide. |
 
 ## References

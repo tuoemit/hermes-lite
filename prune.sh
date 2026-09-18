@@ -53,25 +53,52 @@ rm_group "photon iMessage sidecar" \
     /opt/hermes/plugins/platforms/photon/sidecar/node_modules
 
 # --- Build-time toolchain --------------------------------------------------
-# Native extensions are already built into the upstream venv. These packages
-# are not needed to run Hermes. Avoid architecture-specific filenames except
-# where necessary so the same template works on amd64 and arm64 releases.
-rm_group "C/C++ toolchain" \
-    /usr/libexec/gcc /usr/lib/gcc /usr/include/c++ \
+# Native extensions are already built into the upstream venv, and the compiler
+# backends (/usr/libexec/gcc, /usr/lib/gcc) are removed, so runtime
+# compilation was already impossible — the frontends, headers and build tools
+# are pure dead weight. Keep this architecture-neutral (globs, no exact
+# versions) so a base-image bump cannot silently skip a rule.
+rm_group "C/C++ frontends" \
+    /usr/bin/gcc /usr/bin/g++ /usr/bin/cc /usr/bin/c++ \
+    /usr/bin/x86_64-linux-gnu-gcc* /usr/bin/aarch64-linux-gnu-gcc* \
+    /usr/bin/x86_64-linux-gnu-g++* /usr/bin/aarch64-linux-gnu-g++* \
+    /usr/bin/x86_64-linux-gnu-cc /usr/bin/aarch64-linux-gnu-cc \
     /usr/bin/*-linux-gnu-lto-dump-*
+rm_group "binutils" \
+    /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd /usr/bin/ld.gold \
+    /usr/bin/ar /usr/bin/ranlib /usr/bin/nm /usr/bin/objcopy \
+    /usr/bin/objdump /usr/bin/strip /usr/bin/size /usr/bin/addr2line \
+    /usr/bin/c++filt
+rm_group "make"          /usr/bin/make /usr/bin/gmake
+rm_group "C headers"     /usr/include
+rm_group "pkg-config" \
+    /usr/bin/pkg-config /usr/bin/x86_64-linux-gnu-pkg-config \
+    /usr/bin/aarch64-linux-gnu-pkg-config /usr/share/pkgconfig
 rm_group "cmake/ctest/cpack" \
-    /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/share/cmake-3.31
+    /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/share/cmake-*
 
 multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
 if [ -n "$multiarch" ]; then
     rm_group "static libs" \
         /usr/lib/python3.13/config-3.13-* \
-        "/usr/lib/${multiarch}/libc.a"
+        "/usr/lib/${multiarch}/libc.a" \
+        "/usr/lib/${multiarch}/libffi.so" \
+        "/usr/lib/${multiarch}/libolm.a"
 else
     rm_group "static libs" /usr/lib/python3.13/config-3.13-*
 fi
 
 rm_group "docker CLI"            /usr/bin/docker
+
+# --- Dev-only trees (build inputs only, no runtime references) -------------
+# apps/ (only apps/shared reaches the image) and scripts/ are monorepo
+# build/CI inputs: the dashboard SPA and TUI bundles are prebuilt, and no
+# runtime module imports from scripts/.
+rm_group "dev-only trees" \
+    /opt/hermes/apps /opt/hermes/scripts \
+    /opt/hermes/setup.py /opt/hermes/setup-hermes.sh \
+    /opt/hermes/.coderabbit.yaml /opt/hermes/.prettierrc \
+    /opt/hermes/.prettierignore
 
 # --- OS noise --------------------------------------------------------------
 rm_group "apt lists"             /var/lib/apt/lists
@@ -91,17 +118,72 @@ else
     rm_group "playwright chromium+ffmpeg" /opt/hermes/.playwright
     rm_group "fonts"                      /usr/share/fonts
 
+    # The GPU/Xvfb parts are below; this removes the remaining GUI/X11 client
+    # libraries that `playwright install --with-deps` pulled in. Shared runtime
+    # libs are deliberately kept (libexpat -> Python, libglib, freetype,
+    # fontconfig, pixman) — the ldd integrity sweep below fails the build if
+    # anything we removed is still load-time-required.
     if [ -n "$multiarch" ]; then
+        # NB: the ${multiarch} dir part is quoted, the glob is NOT — rm_group
+        # passes each argument to `rm -rf` verbatim, so a quoted glob would be
+        # a literal filename and silently match nothing. Unmatched patterns are
+        # harmless (rm -f ignores them), which keeps this safe across base
+        # image bumps.
         rm_group "mesa/LLVM GPU stack" \
-            "/usr/lib/${multiarch}/libLLVM.so.19.1" \
-            "/usr/lib/${multiarch}/libgallium-25.0.7-2+deb13u1.so" \
-            "/usr/lib/${multiarch}/libz3.so.4" \
+            "/usr/lib/${multiarch}"/libLLVM.so.* \
+            "/usr/lib/${multiarch}"/libgallium*.so* \
+            "/usr/lib/${multiarch}"/libz3.so.* \
+            "/usr/lib/${multiarch}"/libdri2.so.* \
+            "/usr/lib/${multiarch}"/libGL.so.1* \
+            "/usr/lib/${multiarch}"/libEGL.so.1* \
+            "/usr/lib/${multiarch}"/libOpenGL.so.1* \
+            "/usr/lib/${multiarch}"/libGLX*.so* \
+            "/usr/lib/${multiarch}"/libgbm.so.1* \
+            "/usr/lib/${multiarch}"/libdrm.so.2* \
             "/usr/lib/${multiarch}/dri"
+        rm_group "GUI/X11 client libs (playwright apt deps)" \
+            "/usr/lib/${multiarch}"/libnss3.so* "/usr/lib/${multiarch}"/libnssutil3.so* \
+            "/usr/lib/${multiarch}"/libsmime3.so* "/usr/lib/${multiarch}"/libssl3.so* \
+            "/usr/lib/${multiarch}"/libfreebl3.so* "/usr/lib/${multiarch}"/libnspr4.so* \
+            "/usr/lib/${multiarch}"/libatk-1.0.so.0* "/usr/lib/${multiarch}"/libatk-bridge-2.0.so.0* \
+            "/usr/lib/${multiarch}"/libatspi.so.0* \
+            "/usr/lib/${multiarch}"/libpango-1.0.so.0* "/usr/lib/${multiarch}"/libpangocairo-1.0.so.0* \
+            "/usr/lib/${multiarch}"/libpangoft2-1.0.so.0* "/usr/lib/${multiarch}"/libcairo.so.2* \
+            "/usr/lib/${multiarch}"/libcups.so.2* \
+            "/usr/lib/${multiarch}"/libxkbcommon.so.0* "/usr/lib/${multiarch}"/libxkbcommon-x11.so.0* \
+            "/usr/lib/${multiarch}"/libxcomposite.so.1* "/usr/lib/${multiarch}"/libxdamage.so.1* \
+            "/usr/lib/${multiarch}"/libxfixes.so.3* "/usr/lib/${multiarch}"/libxrandr.so.2* \
+            "/usr/lib/${multiarch}"/libxrender.so.1* "/usr/lib/${multiarch}"/libxext.so.6* \
+            "/usr/lib/${multiarch}"/libX11.so.6* "/usr/lib/${multiarch}"/libX11-xcb.so.1* \
+            "/usr/lib/${multiarch}"/libxcb.so.1* \
+            "/usr/lib/${multiarch}"/libxshmfence.so.1* \
+            "/usr/lib/${multiarch}"/libwayland-client.so.1* \
+            "/usr/lib/${multiarch}"/libasound.so.2*
     fi
+    rm_group "ALSA data"                  /usr/share/alsa
     rm_group "Xvfb/X11 utils" \
         /usr/bin/Xvfb /usr/bin/xkbcomp /usr/bin/xkbprint \
         /usr/bin/xkbevd /usr/share/X11
 fi
+
+# --- Shared-library integrity sweep -----------------------------------------
+# Every prune above must leave no runtime binary or venv native extension with
+# an unresolvable DT_NEEDED dependency. A "not found" line fails the build —
+# this is what makes the aggressive toolchain/GUI pruning safe.
+missing=$( {
+    ldd "$(command -v python3)" 2>/dev/null
+    ldd /usr/local/bin/node 2>/dev/null
+    ldd /opt/hermes/.venv/bin/python3 2>/dev/null
+    find /opt/hermes/.venv -type f -name '*.so' -print0 2>/dev/null \
+        | xargs -0 -r -n 200 ldd 2>/dev/null
+    ldd /usr/bin/rg /usr/bin/git /usr/bin/ffmpeg 2>/dev/null
+} | grep -i "not found" || true)
+if [ -n "$missing" ]; then
+    echo "ERROR: prune removed a shared library still required at runtime:" >&2
+    echo "$missing" >&2
+    exit 1
+fi
+echo "prune verify: shared-library integrity OK"
 
 # PYTHONDONTWRITEBYTECODE=1 prevents new bytecode files at runtime.
 # Remove safe, non-runtime cache/junk artifacts from Hermes itself. Keep this
@@ -140,6 +222,24 @@ for f in /etc/s6-overlay/s6-rc.d/dashboard/run /opt/hermes/docker/main-wrapper.s
     sed -i 's|^cd /opt/data$|cd "$HERMES_HOME"|' "$f"
 done
 echo "  patched: HOME aligned to \$HERMES_HOME (dashboard/run + main-wrapper)"
+
+# --- /opt/data -> /data/.hermes compatibility symlink -----------------------
+# The sed patch above only covers STATIC image files. Upstream also renders
+# per-profile gateway s6 scripts at RUNTIME (hermes_cli/service_manager.py
+# hard-codes `export HOME=/opt/data` + `cd /opt/data` and writes them to the
+# tmpfs /run/service at boot — unreachable from any build-time patch). That
+# gateway-default slot is the process that actually serves the Telegram bot,
+# so a static patch alone leaves its HOME-anchored state (git config, .netrc,
+# provider SDK config, XDG state) in the non-persistent /opt/data skeleton.
+#
+# Replacing the hermes user's home skeleton with a symlink into the template's
+# data root makes EVERY current and future /opt/data reference (static
+# scripts, generated scripts, HOME fallbacks) resolve to /data/.hermes.
+# The upstream stage2 hook guarantees /data/.hermes exists (root mkdir -p +
+# chown) before any supervised process starts, so the link never dangles.
+rm -rf /opt/data
+ln -s /data/.hermes /opt/data
+echo "  linked: /opt/data -> /data/.hermes"
 
 after=$(du -sm / 2>/dev/null | cut -f1)
 echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER})"
@@ -183,12 +283,34 @@ if missing:
 print("prune verify: imports OK, runtime assets present")
 PY
 
+# The dashboard Chat tab spawns the prebuilt TUI bundle. Prove the bundle is
+# loadable (every import resolves): with non-TTY stdin the entry evaluates the
+# whole bundle, prints 'hermes-tui: no TTY' and exits 0 — a corrupt or
+# incomplete bundle dies non-zero before that point. Run it exactly the way
+# the launcher's fast path does (node --expose-gc).
+tui_probe=$(/usr/local/bin/node --expose-gc /opt/hermes/ui-tui/dist/entry.js </dev/null 2>&1) || {
+    echo "ERROR: TUI bundle probe crashed (exit=$?):" >&2
+    echo "$tui_probe" >&2
+    exit 1
+}
+case "$tui_probe" in
+    *"hermes-tui: no TTY"*) echo "prune verify: TUI bundle loads" ;;
+    *)
+        echo "ERROR: TUI bundle probe gave unexpected output: $tui_probe" >&2
+        exit 1
+        ;;
+esac
+
+# Bind 0.0.0.0 (still reachable only from inside the build container) so the
+# production auth gate — non-loopback bind + required provider, fail-closed —
+# is actually exercised. /api/health is on the dashboard's public (auth-exempt)
+# path list, so a 200 still means "gated dashboard started correctly".
 HERMES_HOME=/tmp/prune-verify-home \
 HERMES_WRITE_SAFE_ROOT=/tmp/prune-verify-home \
 HERMES_DASHBOARD_FILES_ROOT=/ \
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=verify \
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=verify-password \
-/opt/hermes/.venv/bin/hermes dashboard --host 127.0.0.1 --port 19119 --no-open >/tmp/hermes-dashboard-smoke.log 2>&1 &
+/opt/hermes/.venv/bin/hermes dashboard --host 0.0.0.0 --port 19119 --no-open >/tmp/hermes-dashboard-smoke.log 2>&1 &
 dash_pid=$!
 
 cleanup_dashboard() {
