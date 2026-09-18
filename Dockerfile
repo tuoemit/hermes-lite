@@ -8,7 +8,7 @@
 # fresh image so the removed bytes do not remain in parent layers.
 # ============================================================================
 
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.9.14
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.9.14@sha256:99641e57ec762c59e54cb44aa6746b7fc68c18b3c5ddb088af54234c613d9294
 
 # ---------------------------------------------------------------------------
 # Stage 1 — prune the official Hermes image.
@@ -42,7 +42,7 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
-    HERMES_DASHBOARD_FILES_ROOT=/ \
+    HERMES_DASHBOARD_FILES_ROOT=/data/.hermes \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/lazy-packages \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

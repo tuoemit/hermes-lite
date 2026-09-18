@@ -1,0 +1,32 @@
+# Docker build context exclusions for the hermes-lite Railway template.
+# The context is tiny (six files + this one); these declarations are cheap
+# insurance against editor cruft and accidental secret leakage into the build.
+
+# VCS / editor / OS noise
+.git
+.gitignore
+.gitmodules
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local scripts / secrets — never belong in the image build context
+.env
+.env.*
+*.pem
+*.key
+
+# Scratch / extracted trees (e.g. from auditing or local extraction)
+upstream/
+hermes-extracted/
+uploads/
+*.zip
+*.tgz
+*.tar.gz
+
+# Python bytecode
+__pycache__/
+*.pyc

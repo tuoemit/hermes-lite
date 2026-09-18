@@ -48,9 +48,67 @@ rm_group "ui-tui TS source" \
     /opt/hermes/ui-tui/vitest.config.ts \
     /opt/hermes/ui-tui/eslint.config.mjs
 
-# macOS-only iMessage bridge; cannot run in the Linux Railway image.
-rm_group "photon iMessage sidecar" \
-    /opt/hermes/plugins/platforms/photon/sidecar/node_modules
+# --- Out-of-scope messaging platforms (Telegram is the only target) --------
+# The user removed WhatsApp + iMessage/Photon from scope. This template must
+# stay a Telegram+dashboard deployment. Below we delete only what has been
+# dependency-traced against the pinned release:
+#
+#   plugins/platforms/whatsapp/   directory plugin (Baileys node bridge):
+#                                discovered via plugins/platforms/* plugin.yaml
+#                                scan — no Python module imports it; removing
+#                                the dir removes it from discovery.
+#   plugins/platforms/photon/    directory plugin (iMessage via Spectrum
+#                                sidecar); same discovery mechanism, no imports.
+#   plugins/platforms/photon/sidecar/node_modules/
+#                                build-time-baked sidecar deps (macOS/Linux
+#                                node sidecar we do not run).
+#   scripts/whatsapp-bridge/     bridge.js + manifest, mirrored into
+#                                HERMES_HOME at runtime. With the plugin gone
+#                                it is dead weight (also covered by the
+#                                scripts/ sweep further down in this file —
+#                                kept here explicit for clarity).
+#   gateway/platforms/whatsapp_common.py + whatsapp_cloud.py
+#                                Builtin modules. whatsapp_cloud is wired into
+#                                gateway/run.py:_BUILTIN_ADAPTERS (a module
+#                                removed never breaks startup: dispatch is
+#                                lazy + adapter-creation failures degrade to
+#                                "No adapter" logs), BUT an operator could
+#                                still enable whatsapp_cloud in config.yaml,
+#                                and the lazy import_module() would raise
+#                                ModuleNotFoundError out of _instantiate_*.
+#                                We DEFUSE that upstream line in-place below,
+#                                mirroring the exact v2026.9.14 text so nothing
+#                                else changes. Keeping whatsapp_common would
+#                                pull WhatsAppBehaviorMixin runtime deps; it is
+#                                only referenced by the two removed modules &
+#                                the whatsapp plugin (all gone or defused).
+#
+# We do NOT touch the CLI surface (hermes_cli/subcommands/whatsapp.py, the
+# dashboard messaging routes). They keep working but only import the removed
+# core modules lazily, inside function bodies, so a shell invocation cannot
+# import-crash. Erasing them would be a deeper upstream patch with zero
+# runtime benefit (they are already dead code at rest).
+rm_group "whatsapp platform plugin"   /opt/hermes/plugins/platforms/whatsapp
+rm_group "photon/iMessage plugin"     /opt/hermes/plugins/platforms/photon
+rm_group "whatsapp bridge scripts"    /opt/hermes/scripts/whatsapp-bridge
+rm_group "whatsapp core modules"      \
+    /opt/hermes/gateway/platforms/whatsapp_common.py \
+    /opt/hermes/gateway/platforms/whatsapp_cloud.py
+
+# Defuse the upstream builtin-adapter entry for the removed whatsapp_cloud
+# module so an operator who enables `platforms.whatsapp_cloud` in config.yaml
+# can never crash-loop the gateway on a missing module import. The upstream
+# entry is a TWO-LINE statement (key + message continuation): delete both
+# lines together. Anchor on the exact upstream text so a version bump fails
+# the build instead of drifting.
+_runpy=/opt/hermes/gateway/run.py
+grep -qF 'Platform.WHATSAPP_CLOUD: ("whatsapp_cloud", "WhatsAppCloudAdapter", "check_whatsapp_cloud_requirements",' "$_runpy" || {
+    echo 'ERROR: whatsapp_cloud builtin-adapter line not found in gateway/run.py — update this patch for the pinned Hermes release' >&2
+    exit 1
+}
+# N joins the following continuation line into the pattern space; d deletes both.
+sed -i '/^    Platform\.WHATSAPP_CLOUD:/{N;d;}' "$_runpy"
+echo "  defused: whatsapp_cloud builtin-adapter entry removed from gateway/run.py"
 
 # --- Build-time toolchain --------------------------------------------------
 # Native extensions are already built into the upstream venv, and the compiler
@@ -91,14 +149,27 @@ fi
 rm_group "docker CLI"            /usr/bin/docker
 
 # --- Dev-only trees (build inputs only, no runtime references) -------------
-# apps/ (only apps/shared reaches the image) and scripts/ are monorepo
-# build/CI inputs: the dashboard SPA and TUI bundles are prebuilt, and no
-# runtime module imports from scripts/.
+# apps/ (only apps/shared reaches the image, as a web-build input already
+# bundled into the SPA) and the setup/lint shims are monorepo build/CI inputs.
 rm_group "dev-only trees" \
-    /opt/hermes/apps /opt/hermes/scripts \
+    /opt/hermes/apps \
     /opt/hermes/setup.py /opt/hermes/setup-hermes.sh \
     /opt/hermes/.coderabbit.yaml /opt/hermes/.prettierrc \
     /opt/hermes/.prettierignore
+
+# scripts/ is mostly dev/CI tooling, but upstream's stage2 boot hook EXECUTES
+# two files from it on every container start (docker/stage2-hook.sh, pinned
+# release): scripts/docker_config_migrate.py (config-schema migrations) and
+# scripts/docker_rebootstrap_nous_session.py (HERMES_AUTH_JSON_REBOOTSTRAP).
+# Deleting scripts/ wholesale silently disables config migrations on
+# volume-backed upgrades and prints a boot warning every start. Preserve just
+# those two (both stdlib-only, no intra-scripts imports); delete the rest
+# (CI/release/dev tooling, the WhatsApp bridge, installer shims).
+find /opt/hermes/scripts -mindepth 1 -maxdepth 1 \
+    ! -name 'docker_config_migrate.py' \
+    ! -name 'docker_rebootstrap_nous_session.py' \
+    -exec rm -rf {} + 2>/dev/null || true
+echo "  pruned: dev-only scripts (kept stage2 utils: docker_config_migrate.py, docker_rebootstrap_nous_session.py)"
 
 # --- OS noise --------------------------------------------------------------
 rm_group "apt lists"             /var/lib/apt/lists

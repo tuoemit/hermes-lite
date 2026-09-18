@@ -37,8 +37,15 @@ if [ -n "${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}" ]; then
 fi
 case "${HERMES_DASHBOARD:-1}" in
     0|false|FALSE|no|NO)
-        basic_ok=-1
-        echo "[railway-entrypoint] dashboard disabled; skipping auth preflight"
+        # The template's Railway health check is GET /api/health, which only
+        # the dashboard answers on the public PORT. Disabling the dashboard
+        # would leave nothing to answer the probe and Railway would
+        # restart-loop — fail fast instead of booting into that loop.
+        echo "ERROR: HERMES_DASHBOARD is disabled, but this template's health" >&2
+        echo "       check (GET /api/health on \$PORT) is served by the dashboard." >&2
+        echo "       A disabled dashboard has nothing to answer the probe and" >&2
+        echo "       Railway would restart-loop. Keep HERMES_DASHBOARD=1 (default)." >&2
+        exit 2
         ;;
     *)
         if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ]; then
@@ -54,8 +61,6 @@ esac
 # Startup banner for Railway log triage: the values that matter at a glance.
 if [ "$basic_ok" = 1 ]; then
     auth_label="basic"
-elif [ "$basic_ok" = -1 ]; then
-    auth_label="disabled"
 else
     auth_label="oauth"
 fi
