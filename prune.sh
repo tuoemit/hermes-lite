@@ -312,6 +312,31 @@ rm -rf /opt/data
 ln -s /data/.hermes /opt/data
 echo "  linked: /opt/data -> /data/.hermes"
 
+# --- Dashboard file-browser hardening: block /proc from the spot editor -----
+# The dashboard's /api/fs/* routes (spot editor / terminal helper) resolve
+# arbitrary absolute paths and do NOT honor HERMES_DASHBOARD_FILES_ROOT. Their
+# read-side guard (hermes_cli/web_routers/files.py::_is_sensitive_path) blocks
+# credential basenames but not /proc. Because dashboard + gateway share the
+# hermes uid, /proc/<pid>/environ is owner-readable and would expose every
+# container secret (Telegram token, model keys, the dashboard password) to an
+# authenticated dashboard user through the UI.
+#
+# Fix: teach _is_sensitive_path to reject the ABSOLUTE /proc root subtree
+# (path.parts[0]=="/" and parts[1]=="proc"). Scoped precisely to /proc so a
+# legitimately named "<workdir>/proc" directory is unaffected. The browser tab
+# (managed /api/files/*) is already confined to
+# HERMES_DASHBOARD_FILES_ROOT=/data/.hermes, so this only hardens the spot
+# editor routes. Gateway-side /proc diagnostics are untouched (this module is
+# dashboard-only). Anchor on the exact upstream line so a version bump fails
+# the build instead of silently drifting.
+_fsfiles=/opt/hermes/hermes_cli/web_routers/files.py
+grep -qF '    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)' "$_fsfiles" || {
+    echo 'ERROR: sensitive-path guard line not found in hermes_cli/web_routers/files.py — update this patch for the pinned Hermes release' >&2
+    exit 1
+}
+sed -i 's|^    return any(part\.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path\.parts)$|    if len(path.parts) >= 2 and path.parts[0] == "/" and path.parts[1] == "proc":\n        return True\n    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)|' "$_fsfiles"
+echo "  hardened: dashboard file browser blocks /proc (sensitive-path guard)"
+
 after=$(du -sm / 2>/dev/null | cut -f1)
 echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER})"
 

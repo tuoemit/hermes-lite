@@ -45,11 +45,14 @@ All state lives under `HERMES_HOME=/data/.hermes` (ephemeral by default; see **S
 
 | Variable | Notes |
 |---|---|
+| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` | **Preferred over the plaintext password.** Set this instead of `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`: a pre-computed scrypt hash, so the plaintext never sits in the container environment and cannot leak via `/proc/<pid>/environ` dumps. See *Credential hygiene* below. |
+| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Plaintext password — only if you cannot pre-compute the hash. Hashed in-memory at boot; avoid because it travels as-is in environ. |
 | `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | Stable signing key so dashboard sessions survive restarts. Without it you are logged out on every redeploy. Generate with `openssl rand -hex 32`. |
 
 > **Auth preflight (fail-fast).** The entrypoint exits with an actionable error at boot if the dashboard
-> is public but no Basic Auth credentials or `HERMES_DASHBOARD_OAUTH_CLIENT_ID` are set — instead of
-> silently crash-looping against the health check.
+> is public but no credential is configured — Basic Auth needs username + (password OR password hash)
+> `HERMES_DASHBOARD_OAUTH_CLIENT_ID` for OAuth/OIDC — instead of silently crash-looping against the
+> health check.
 
 ### Telegram
 
@@ -126,11 +129,34 @@ GET /api/health
 
 ## Security notes
 
-- The dashboard file browser is confined to `/data/.hermes` (`HERMES_DASHBOARD_FILES_ROOT`) — the
-  agent's write tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
+- Dashboard login supports a **pre-hashed password** (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`) — see
+  *Credential hygiene* below. Prefer it so the plaintext never enters the container environment.
+- The dashboard file browser is confined to `/data/.hermes` (`HERMES_DASHBOARD_FILES_ROOT`); the spot
+  editor additionally denies `/proc` (sensitive-path guard) — so dashboard-UI access cannot read
+  `/proc/<pid>/environ`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
 - Keep all credentials in Railway **secret** variables. The boot hook seeds `$HERMES_HOME/.env` with
   mode `0600`.
 - The image base is pinned by digest (tag + `@sha256:…`) for reproducible builds.
+
+### Credential hygiene
+
+Railway injects secrets as environment variables, and `/proc/<pid>/environ` exposes them in plaintext to
+any process running as the same user — which includes the Hermes agent itself (its shell runs as user
+`hermes`, uid 10000, in the same container). Practical rules:
+
+1. **Don't put the dashboard password in environ.** Compute its scrypt hash offline and set only
+   `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`:
+   `python3 -c "import os,hashlib,base64,secrets,hmac;pw=input('pw: ').encode();s=secrets.token_bytes(16);print('scrypt$16384$8$1$%s$%s'%(base64.b64encode(s).decode(),base64.b64encode(hashlib.scrypt(pw,salt=s,n=16384,r=8,p=1,dklen=32,maxmem=0)).decode()))"`
+   (Verify locally with `openssl rand -hex 32` for the `_SECRET` if you need a new one.)
+2. **After a lease/transcript incident, rotate** the affected values immediately — `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`/`_HASH`/`_SECRET`, `TELEGRAM_BOT_TOKEN`, and any active model key.
+3. **Prefer the `_HASH` for the dashboard credential**, which makes a leaked hash unsuitable for login
+   (scrypt) and easily rotated.
+
+> The `/proc` deny-list covers the dashboard (browser + spot editor), **not** the agent's own shell. The
+> documented trust model is that the agent runs *as* the user in the container; treat its filesystem/
+> shell access as capable of reading its own environment, and keep secrets out of environ where
+> possible (hash for the password; Telegram token and signing secret must remain env/`.env` because the
+> gateway process needs them).
 
 ---
 

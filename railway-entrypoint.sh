@@ -28,7 +28,13 @@ export HERMES_DASHBOARD_PORT="$PORT"
 # closed, nothing answers /api/health, and Railway crash-loops with no
 # actionable error in the logs. Fail fast here instead.
 basic_ok=0
-if [ -n "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ] && [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ]; then
+# Basic Auth counts as configured when BOTH username and a credential are
+# present. The credential may be the plaintext HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+# (upstream hashes it in-memory) OR a pre-computed scrypt hash in
+# HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH. Prefer the hash: it has no plaintext
+# to leak, so a stray `/proc/<pid>/environ` dump cannot expose the login.
+if [ -n "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ] && \
+   { [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ] || [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}" ]; }; then
     basic_ok=1
 fi
 oauth_ok=0
@@ -51,8 +57,10 @@ case "${HERMES_DASHBOARD:-1}" in
         if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ]; then
             echo "ERROR: the dashboard is public but no auth provider is configured." >&2
             echo "       Set HERMES_DASHBOARD_BASIC_AUTH_USERNAME and HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" >&2
-            echo "       (recommended: also HERMES_DASHBOARD_BASIC_AUTH_SECRET so sessions survive" >&2
-            echo "       restarts), or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for OAuth/OIDC." >&2
+            echo "       (preferred: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH — a pre-computed scrypt hash," >&2
+            echo "       so the plaintext never sits in the container environment)." >&2
+            echo "       Recommended: also HERMES_DASHBOARD_BASIC_AUTH_SECRET so sessions survive restarts." >&2
+            echo "       Or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for OAuth/OIDC." >&2
             exit 2
         fi
         ;;
