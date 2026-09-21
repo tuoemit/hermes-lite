@@ -24,12 +24,13 @@ RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLit
 # Set to 1 only if you need Playwright/Chromium browser tools.
 ARG KEEP_BROWSER=0
 
-# In-browser Chat tab: KEPT by default (node + the prebuilt TUI bundle are its
-# runtime). Set to 0 only if you never use the dashboard's embedded chat and
-# want the Node runtime stripped — this removes node/npm and the TUI bundle,
-# so `hermes --tui` and the dashboard Chat tab stop working (the tab fails
-# closed with a clean "Chat unavailable" instead of crashing the dashboard).
-# Browsers (KEEP_BROWSER) have no node dependency either way.
+# In-browser Chat tab: OFF by default. This template targets a Telegram-only
+# deployment, so Node + the prebuilt TUI bundle (the tab's entire runtime) are
+# removed by default. Set to 1 only if you use the dashboard's embedded chat
+# (or `hermes --tui`) and want that runtime kept. With 0 the tab fails closed
+# with a clean "Chat unavailable" instead of crashing the dashboard, and
+# `hermes --tui` goes dark (opt-in trade). Browsers (KEEP_BROWSER) have no
+# node dependency either way.
 ARG KEEP_TUI=0
 
 COPY --chmod=0755 prune.sh /prune.sh
@@ -53,9 +54,8 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     HERMES_HOME=/data/.hermes \
-    HOME=/data \
-    HERMES_WRITE_SAFE_ROOT=/data:/opt:/tmp \
-    HERMES_DASHBOARD_FILES_ROOT=/ \
+    HERMES_WRITE_SAFE_ROOT=/data \
+    HERMES_DASHBOARD_FILES_ROOT=/data/.hermes \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     HERMES_LAZY_INSTALL_TARGET=/data/lazy-packages \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

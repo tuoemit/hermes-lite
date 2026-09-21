@@ -140,22 +140,56 @@ esac
 # point) at the RUNTIME home. It also survives the ephemeral re-deploy case,
 # where a one-off `--fix` would otherwise be wiped on every fresh
 # (no-volume) restart and the warning would return. Everything here is
-# best-effort: it MUST NOT be able to fail the Pod boot, and it deliberately
-# does not chown (stage2-hook may usermod the hermes UID afterwards, so any
-# pre-remap chown here would dangle). The symlink is only consulted when the
-# shim is not first on PATH; the shim (which re-execs the venv binary by
-# absolute path) still takes precedence and keeps its root-drop contract.
+# best-effort: it MUST NOT be able to fail the Pod boot.
+#
+# OWNERSHIP WARNING (fixed): `.local` is the XDG base dir — the supervised
+# gateway (as the `hermes` user) writes `$HOME/.local/state` there
+# (gateway/status.py). Because this entrypoint runs as root, a root-created
+# `.local` stays root-owned unless we hand it back; upstream's stage2-hook
+# chowns only its canonical subdir list (cron/sessions/logs/... lazy-packages)
+# and never touches `.local`, so a root-owned `.local` makes Telegram startup
+# die with `Permission denied: '$HOME/.local/state'`. We therefore chown the
+# whole `.local` subtree to the FINAL runtime uid/gid — computed the same way
+# stage2-hook will (HERMES_UID/PUID + HERMES_GID/PGID remap, else the baked
+# `hermes` user) so a later usermod cannot strand the ownership. Idempotent,
+# and it also heals a warm volume that an earlier boot left root-owned.
 : "${HERMES_HOME:=/data/.hermes}"
+
+# Compute the uid/gid Hermes' supervised services will actually run as.
+chown_uid=""
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    runtime_uid="$(id -u hermes 2>/dev/null || echo 10000)"
+    runtime_gid="$(id -g hermes 2>/dev/null || echo 10000)"
+    _uid="${HERMES_UID:-${PUID:-}}"
+    _gid="${HERMES_GID:-${PGID:-}}"
+    case "$_uid" in
+        ''|*[!0-9]*) : ;;
+        *) if [ "$_uid" -ge 1 ] && [ "$_uid" -le 65534 ]; then runtime_uid="$_uid"; fi ;;
+    esac
+    case "$_gid" in
+        ''|*[!0-9]*) : ;;
+        *) if [ "$_gid" -ge 1 ] && [ "$_gid" -le 65534 ]; then runtime_gid="$_gid"; fi ;;
+    esac
+    chown_uid="$runtime_uid:$runtime_gid"
+fi
+
 if [ -x /opt/hermes/.venv/bin/hermes ]; then
+    link_dir="$HERMES_HOME/.local/bin"
+    target="/opt/hermes/.venv/bin/hermes"
     (
-        link_dir="$HERMES_HOME/.local/bin"
-        target="/opt/hermes/.venv/bin/hermes"
         if [ ! -e "$link_dir/hermes" ]; then
             mkdir -p "$link_dir" 2>/dev/null \
                 && ln -s "$target" "$link_dir/hermes" 2>/dev/null \
                 && echo "[railway-entrypoint] created $link_dir/hermes -> $target (satisfies 'hermes doctor' command-installation check)"
         fi
     ) || true
+    # Hand `.local` back to the runtime user (idempotent; heals root-owned
+    # leftovers). `chown -R` uses -P semantics during traversal — it does not
+    # follow the bin/hermes symlink, so the sealed venv binary is never touched
+    # (the symlink's own ownership may flip, which is harmless).
+    if [ -n "$chown_uid" ] && [ -d "$HERMES_HOME/.local" ]; then
+        chown -R "$chown_uid" "$HERMES_HOME/.local" 2>/dev/null || true
+    fi
 fi
 
 # Startup banner for Railway log triage: the values that matter at a glance.

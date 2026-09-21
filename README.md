@@ -118,17 +118,15 @@ gateway (≈200–400 MB under load) + dashboard (≈100–200 MB) already fill 
 adds ≈150–300 MB per page and the free-tier disk quota cannot hold the browser stack. Enable only on a
 ≥2 GB plan by building with `KEEP_BROWSER=1`.
 
-## In-browser Chat tab — kept by default
+## In-browser Chat tab — off by default
 
 The dashboard's embedded Chat tab (`/chat`, `/api/pty`) — which also powers `hermes --tui` from a shell —
-runs on the Node runtime and the prebuilt TUI bundle. Those are **kept** by default because the tab is
-part of the normal dashboard experience.
+runs on the Node runtime and the prebuilt TUI bundle. Because this template targets a **Telegram-only**
+deployment, Node and the TUI bundle are **removed by default** (`KEEP_TUI=0`). The Chat tab then fails
+*closed* with a clear "Chat unavailable" message instead of crashing, and `hermes --tui` goes dark.
 
-If you never use the embedded chat, build with `KEEP_TUI=0` to strip Node (`node`/`npm`/`npx`) and the
-TUI bundle (the largest single-purpose Node consumer). The Chat tab then fails *closed* with a clear
-"Chat unavailable" message instead of crashing, and `hermes --tui` goes dark — this is the intended
-opt-out trade. Browser automation (`KEEP_BROWSER`) does **not** require Node, so the two flags are
-independent.
+If you want the in-browser chat, build with `KEEP_TUI=1` to keep Node (`node`/`npm`/`npx`) and the TUI
+bundle. Browser automation (`KEEP_BROWSER`) does **not** require Node, so the two flags are independent.
 
 ---
 

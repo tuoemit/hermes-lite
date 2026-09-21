@@ -6,11 +6,11 @@
 #   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
 #   $2 = KEEP_TUI    (1 = keep Node + the dashboard Chat tab TUI, 0 = remove)
 #
-# Default to removing the browser stack: the template optimizes for the
-# Railway free tier, matching the Dockerfile's ARG KEEP_BROWSER=0. Callers who
-# pass $1 explicitly override this. The TUI is KEPT by default: the dashboard
-# Chat tab is always enabled upstream and node + the prebuilt bundle are its
-# runtime; stripping it is an explicit opt-out (KEEP_TUI=0).
+# Both default to removing: the template targets the Telegram-only Railway free
+# tier, matching the Dockerfile's ARG KEEP_BROWSER=0 / ARG KEEP_TUI=0. Callers
+# who pass $1/$2 explicitly override this. The TUI is the dashboard Chat tab's
+# runtime (node + prebuilt bundle); stripping it is the default and turns the
+# tab off (fails closed). Set KEEP_TUI=1 to keep the Chat tab / `hermes --tui`.
 #
 # The image is pinned to a released Hermes version in Dockerfile. Keep the
 # hard-coded pruning rules aligned with that pinned release and update the
@@ -26,7 +26,7 @@ case "$KEEP_BROWSER" in
         ;;
 esac
 
-KEEP_TUI="${2:-1}"
+KEEP_TUI="${2:-0}"
 case "$KEEP_TUI" in
     0|1) ;;
     *)
@@ -94,8 +94,9 @@ rm_group "npm/_npx cache"        /root/.npm
 rm_group "node compile cache"    /tmp/node-compile-cache
 
 # --- Node build-time trees -------------------------------------------------
-# Keep the prebuilt dashboard and in-browser chat/TUI bundles. Node itself
-# remains because the dashboard Chat tab can spawn the bundled TUI runtime.
+# The dashboard SPA (web_dist) is always kept; its TypeScript source and the
+# TUI's TypeScript/workspace trees are build inputs the baked bundles already
+# replace. Node itself is handled by KEEP_TUI below (removed by default).
 rm_group "root node_modules"     /opt/hermes/node_modules
 rm_group "web/ SPA source"       /opt/hermes/web
 rm_group "ui-tui TS source" \
@@ -108,20 +109,20 @@ rm_group "ui-tui TS source" \
     /opt/hermes/ui-tui/vitest.config.ts \
     /opt/hermes/ui-tui/eslint.config.mjs
 
-# --- Optional: strip the in-browser Chat tab runtime (KEEP_TUI=0) ----------
+# --- In-browser Chat tab runtime (KEEP_TUI; removed by default) ------------
 # The dashboard Chat tab is the only runtime consumer of Node in a
 # Telegram-only deployment (verified: gateway/platforms/*, boot hooks
 # docker/stage2-hook.sh, cont-init.d and s6-rc.d have no node/npm usage; the
 # WhatsApp/photon adapters that also used node are already removed above).
-# With KEEP_TUI=0 we drop node itself and the bundled TUI it runs. The Python
-# launch plumbing is DELIBERATELY KEPT: web_server.py and web_routers/audio.py
-# import web_server_chat at module level, so deleting those modules would
-# crash the dashboard at boot. Instead, with node gone the Chat tab launcher
-# hits upstream's own designed degradation — _tui_node_bin() exits 1 and
-# chat_ws catches the SystemExit and closes the WS with a clear reason — so
-# the tab fails closed rather than breaking the dashboard. `hermes --tui`
-# also goes dark (opt-out semantics). Browsers (KEEP_BROWSER) do not need
-# node.
+# With KEEP_TUI=0 (the default) we drop node itself and the bundled TUI it
+# runs. The Python launch plumbing is DELIBERATELY KEPT: web_server.py and
+# web_routers/audio.py import web_server_chat at module level, so deleting
+# those modules would crash the dashboard at boot. Instead, with node gone the
+# Chat tab launcher hits upstream's own designed degradation — _tui_node_bin()
+# exits 1 and chat_ws catches the SystemExit and closes the WS with a clear
+# reason — so the tab fails closed rather than breaking the dashboard.
+# `hermes --tui` also goes dark (opt-out semantics). Browsers (KEEP_BROWSER)
+# do not need node.
 if [ "$KEEP_TUI" = "0" ]; then
     rm_group "node runtime (KEEP_TUI=0)" \
         /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx \
