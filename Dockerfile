@@ -30,7 +30,7 @@ ARG KEEP_BROWSER=0
 # so `hermes --tui` and the dashboard Chat tab stop working (the tab fails
 # closed with a clean "Chat unavailable" instead of crashing the dashboard).
 # Browsers (KEEP_BROWSER) have no node dependency either way.
-ARG KEEP_TUI=0
+ARG KEEP_TUI=1
 
 COPY --chmod=0755 prune.sh /prune.sh
 RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
@@ -56,7 +56,7 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_WRITE_SAFE_ROOT=/data \
     HERMES_DASHBOARD_FILES_ROOT=/data/.hermes \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_LAZY_INSTALL_TARGET=/data/.hermes/lazy-packages \
+    HERMES_LAZY_INSTALL_TARGET=/data/lazy-packages \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # HERMES_WEB_DIST is load-bearing after pruning the web source tree: it makes

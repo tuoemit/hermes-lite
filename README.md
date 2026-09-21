@@ -34,25 +34,32 @@ All state lives under `HERMES_HOME=/data/.hermes` (ephemeral by default; see **S
 
 ## Variables to set in Railway
 
+The only things you must configure are the **dashboard login** (username + password) and **Telegram**
+(plus `PORT`, which Railway injects automatically). The dashboard's **password hash and session secret
+are generated automatically** — see below.
+
 ### Required
 
 | Variable | Notes |
 |---|---|
-| `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` | Dashboard login username. |
-| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Strong dashboard password (Railway **secret**). |
+| `PORT` | Injected automatically by Railway (a system variable — you don't type it). Mapped to the dashboard HTTP port (`HERMES_DASHBOARD_PORT`) and used by the health check. |
+| `ADMIN_USERNAME` | Dashboard login username (alias of `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`). |
+| `ADMIN_PASSWORD` | Dashboard password, Railway **secret** (alias of `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` — only its hash is used at runtime; see *Credential hygiene*). |
 
-### Strongly recommended
+> Use the short `ADMIN_USERNAME` / `ADMIN_PASSWORD` names, or the canonical
+> `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` — both work, and the canonical one wins if both
+> are set.
 
-| Variable | Notes |
-|---|---|
-| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH` | **Preferred over the plaintext password.** Set this instead of `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`: a pre-computed scrypt hash, so the plaintext never sits in the container environment and cannot leak via `/proc/<pid>/environ` dumps. See *Credential hygiene* below. |
-| `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` | Plaintext password — only if you cannot pre-compute the hash. Hashed in-memory at boot; avoid because it travels as-is in environ. |
-| `HERMES_DASHBOARD_BASIC_AUTH_SECRET` | Stable signing key so dashboard sessions survive restarts. Without it you are logged out on every redeploy. Generate with `openssl rand -hex 32`. |
+That's all. The template fills in the rest automatically:
 
-> **Auth preflight (fail-fast).** The entrypoint exits with an actionable error at boot if the dashboard
-> is public but no credential is configured — Basic Auth needs username + (password OR password hash)
-> `HERMES_DASHBOARD_OAUTH_CLIENT_ID` for OAuth/OIDC — instead of silently crash-looping against the
-> health check.
+- **Password hash** — Hermes hashes your password in-memory at boot, so you never set a
+  `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`. (If you prefer, you *may* set the pre-computed hash
+  instead of the plaintext — see *Credential hygiene*.)
+- **Session secret** — generated + persisted at `$HERMES_HOME/.dash/signing-secret` on first boot, so
+  sessions survive restarts without you setting a `HERMES_DASHBOARD_BASIC_AUTH_SECRET`. On the
+  volume-backed plan the same secret is reused across redeploys; on the ephemeral free tier it is
+  regenerated each deploy (and everyone is logged out once — harmless). You *may* set your own
+  `HERMES_DASHBOARD_BASIC_AUTH_SECRET` to keep reins instead.
 
 ### Telegram
 
@@ -81,9 +88,9 @@ All state lives under `HERMES_HOME=/data/.hermes` (ephemeral by default; see **S
 
 > Telegram and provider keys can also be configured from the dashboard after deploy instead of via env.
 
-### Do not set
-
-`PORT` is injected by Railway and mapped to `HERMES_DASHBOARD_PORT` automatically — do not set it.
+> **Auth preflight (fail-fast).** If the dashboard is public but you set neither the Basic-Auth pair nor
+> OAuth, the entrypoint exits at boot with the exact variables to set, instead of silently crash-looping
+> against the health check.
 
 ---
 
@@ -159,13 +166,14 @@ Railway injects secrets as environment variables, and `/proc/<pid>/environ` expo
 any process running as the same user — which includes the Hermes agent itself (its shell runs as user
 `hermes`, uid 10000, in the same container). Practical rules:
 
-1. **Don't put the dashboard password in environ.** Compute its scrypt hash offline and set only
+1. **The password hash is handled for you.** Set `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` as a Railway
+   secret: Hermes hashes it in-memory at boot, so no pre-computed `_HASH` is needed. If you want the
+   *plaintext* out of environ too, pre-compute the hash once and set only
    `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`:
-   `python3 -c "import os,hashlib,base64,secrets,hmac;pw=input('pw: ').encode();s=secrets.token_bytes(16);print('scrypt$16384$8$1$%s$%s'%(base64.b64encode(s).decode(),base64.b64encode(hashlib.scrypt(pw,salt=s,n=16384,r=8,p=1,dklen=32,maxmem=0)).decode()))"`
-   (Verify locally with `openssl rand -hex 32` for the `_SECRET` if you need a new one.)
-2. **After a lease/transcript incident, rotate** the affected values immediately — `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`/`_HASH`/`_SECRET`, `TELEGRAM_BOT_TOKEN`, and any active model key.
-3. **Prefer the `_HASH` for the dashboard credential**, which makes a leaked hash unsuitable for login
-   (scrypt) and easily rotated.
+   `python3 -c "import hashlib,base64,secrets;pw=input('pw: ').encode();s=secrets.token_bytes(16);print('scrypt$16384$8$1$%s$%s'%(base64.b64encode(s).decode(),base64.b64encode(hashlib.scrypt(pw,salt=s,n=16384,r=8,p=1,dklen=32,maxmem=0)).decode()))"`
+2. **The session secret is handled for you too** — generated and persisted in `$HERMES_HOME/.dash/signing-secret`.
+   You only need to manage `HERMES_DASHBOARD_BASIC_AUTH_SECRET` if you want to own it.
+3. **After a lease/transcript incident, rotate** the affected values immediately — `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD`/`_HASH`/`_SECRET`, `TELEGRAM_BOT_TOKEN`, and any active model key.
 
 > The `/proc` deny-list covers the dashboard (browser + spot editor), **not** the agent's own shell. The
 > documented trust model is that the agent runs *as* the user in the container; treat its filesystem/
@@ -254,7 +262,7 @@ default-preserving option, not a template change.
 |---|---|
 | `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; `KEEP_BROWSER`/`KEEP_TUI` build-args; Railway runtime env. |
 | `prune.sh` | Removes build-only + out-of-scope content, aligns `HOME` with `HERMES_HOME`, upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
-| `railway-entrypoint.sh` | Validates `PORT`, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
+| `railway-entrypoint.sh` | Validates `PORT`, routes `ADMIN_USERNAME`/`ADMIN_PASSWORD` aliases, auto-generates the session secret, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
 | `README.md` | This guide. |
 

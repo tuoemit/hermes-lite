@@ -20,19 +20,39 @@ fi
 # Railway's PORT is authoritative. Allowing a separate dashboard port causes
 # Railway's health probe and Hermes to disagree about where the service lives.
 export HERMES_DASHBOARD_PORT="$PORT"
+: "${HERMES_HOME:=/data/.hermes}"
 
-# --- Dashboard auth preflight ------------------------------------------------
-# The dashboard binds 0.0.0.0 on Railway's public port, so upstream's auth
-# gate is engaged and REQUIRES a registered provider (HERMES_DASHBOARD_INSECURE
-# no longer disables it). Without a provider the dashboard service fails
-# closed, nothing answers /api/health, and Railway crash-loops with no
-# actionable error in the logs. Fail fast here instead.
+# ---- Short credential aliases -----------------------------------------------
+# Friendly names for the dashboard login. The canonical (underscored) Hermes
+# variables take precedence if both are set; otherwise the short name is routed
+# into the canonical one. This keeps upstream's variables intact while letting
+# operators use the shorter names in Railway.
+if [ -z "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ] && [ -n "${ADMIN_USERNAME:-}" ]; then
+    export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$ADMIN_USERNAME"
+fi
+if [ -z "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ] && [ -n "${ADMIN_PASSWORD:-}" ]; then
+    export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$ADMIN_PASSWORD"
+fi
+
+# ---- Dashboard credential contract ------------------------------------------
+# The dashboard binds 0.0.0.0 on the public port, so upstream's auth gate
+# REQUIRES a provider. This template's contract:
+#
+#   * YOU set   ADMIN_USERNAME / ADMIN_PASSWORD (short aliases below route into
+#               HERMES_DASHBOARD_BASIC_AUTH_USERNAME / _PASSWORD — plaintext is
+#               fine). You may also set the canonical names directly, or a
+#               pre-computed HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH instead
+#               of the plaintext if you prefer not to.
+#   * AUTO      the password hash — Hermes hashes the plaintext in-memory at
+#               boot, so you never need a _HASH. The session-signing secret is
+#               generated + persisted below so sessions survive restarts
+#               without you maintaining a HERMES_DASHBOARD_BASIC_AUTH_SECRET.
+#
+# OAuth is the alternative to the Basic-Auth pair: set
+# HERMES_DASHBOARD_OAUTH_CLIENT_ID instead.
+
+# Basic Auth is configured when BOTH username and a credential are present.
 basic_ok=0
-# Basic Auth counts as configured when BOTH username and a credential are
-# present. The credential may be the plaintext HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
-# (upstream hashes it in-memory) OR a pre-computed scrypt hash in
-# HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH. Prefer the hash: it has no plaintext
-# to leak, so a stray `/proc/<pid>/environ` dump cannot expose the login.
 if [ -n "${HERMES_DASHBOARD_BASIC_AUTH_USERNAME:-}" ] && \
    { [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-}" ] || [ -n "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH:-}" ]; }; then
     basic_ok=1
@@ -41,12 +61,52 @@ oauth_ok=0
 if [ -n "${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}" ]; then
     oauth_ok=1
 fi
+
+# ---- Session-signing secret: auto-generate + persist ------------------------
+# When Basic Auth is in use and the operator set no secret, generate one and
+# persist it so dashboard sessions stay valid across restarts (and are shared
+# by the supervised processes within a boot). Hex-form so the plugin's secret
+# decoder (bytes.fromhex -> 32 bytes) accepts it. Persisted at
+# $HERMES_HOME/.dash/signing-secret (0600): re-used on volume-backed redeploys,
+# regenerated on the ephemeral free tier. Best-effort: if we cannot persist, we
+# still export the in-memory value for this boot and warn (otherwise upstream
+# would fall back to a random per-process key and log everyone out on every
+# restart).
+if [ "$basic_ok" = 1 ] && [ -z "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}" ]; then
+    secret_file="$HERMES_HOME/.dash/signing-secret"
+    secret_val="$(cat "$secret_file" 2>/dev/null || true)"
+    if [ -z "$secret_val" ]; then
+        secret_val="$(/opt/hermes/.venv/bin/python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
+        if [ -n "$secret_val" ]; then
+            if mkdir -p "$HERMES_HOME/.dash" 2>/dev/null \
+               && printf '%s\n' "$secret_val" > "$secret_file" 2>/dev/null \
+               && chmod 600 "$secret_file" 2>/dev/null; then
+                echo "[railway-entrypoint] generated + persisted HERMES_DASHBOARD_BASIC_AUTH_SECRET ($secret_file)"
+            else
+                echo "[railway-entrypoint] WARNING: could not persist the generated dashboard secret; sessions may not survive restarts" >&2
+            fi
+        fi
+    fi
+    if [ -n "$secret_val" ]; then
+        # Export for this process tree. This is exactly equivalent to the
+        # operator setting a Railway variable: s6-overlay's /init imports the
+        # exec-time environment at startup, and every supervised service
+        # (dashboard, gateways) rehydrates it via its `with-contenv` shebang —
+        # the same path TELEGRAM_BOT_TOKEN and the other runtime variables
+        # take. So the auto-generated secret reaches the dashboard process
+        # without the operator maintaining it.
+        export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$secret_val"
+    fi
+fi
+
+# --- Dashboard auth preflight ------------------------------------------------
+# The dashboard binds 0.0.0.0 on Railway's public port, so upstream's auth
+# gate is engaged and REQUIRES a registered provider (HERMES_DASHBOARD_INSECURE
+# no longer disables it). Without a provider the dashboard service fails
+# closed, nothing answers /api/health, and Railway crash-loops with no
+# actionable error in the logs. Fail fast here instead.
 case "${HERMES_DASHBOARD:-1}" in
     0|false|FALSE|no|NO)
-        # The template's Railway health check is GET /api/health, which only
-        # the dashboard answers on the public PORT. Disabling the dashboard
-        # would leave nothing to answer the probe and Railway would
-        # restart-loop — fail fast instead of booting into that loop.
         echo "ERROR: HERMES_DASHBOARD is disabled, but this template's health" >&2
         echo "       check (GET /api/health on \$PORT) is served by the dashboard." >&2
         echo "       A disabled dashboard has nothing to answer the probe and" >&2
@@ -56,10 +116,10 @@ case "${HERMES_DASHBOARD:-1}" in
     *)
         if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ]; then
             echo "ERROR: the dashboard is public but no auth provider is configured." >&2
-            echo "       Set HERMES_DASHBOARD_BASIC_AUTH_USERNAME and HERMES_DASHBOARD_BASIC_AUTH_PASSWORD" >&2
-            echo "       (preferred: HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH — a pre-computed scrypt hash," >&2
-            echo "       so the plaintext never sits in the container environment)." >&2
-            echo "       Recommended: also HERMES_DASHBOARD_BASIC_AUTH_SECRET so sessions survive restarts." >&2
+            echo "       Set ADMIN_USERNAME and ADMIN_PASSWORD (or the canonical" >&2
+            echo "       HERMES_DASHBOARD_BASIC_AUTH_USERNAME / _PASSWORD names)." >&2
+            echo "       The password hash and the session secret are generated automatically," >&2
+            echo "       so you do NOT need to set them." >&2
             echo "       Or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for OAuth/OIDC." >&2
             exit 2
         fi
