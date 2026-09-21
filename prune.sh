@@ -4,13 +4,20 @@
 # the result. The pruned tree is flattened into a fresh stage by Dockerfile.
 #
 #   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
+#   $2 = KEEP_TUI    (1 = keep Node + the dashboard Chat tab TUI, 0 = remove)
+#
+# Default to removing the browser stack: the template optimizes for the
+# Railway free tier, matching the Dockerfile's ARG KEEP_BROWSER=0. Callers who
+# pass $1 explicitly override this. The TUI is KEPT by default: the dashboard
+# Chat tab is always enabled upstream and node + the prebuilt bundle are its
+# runtime; stripping it is an explicit opt-out (KEEP_TUI=0).
 #
 # The image is pinned to a released Hermes version in Dockerfile. Keep the
 # hard-coded pruning rules aligned with that pinned release and update the
 # version intentionally when Hermes is upgraded.
 set -eu
 
-KEEP_BROWSER="${1:-1}"
+KEEP_BROWSER="${1:-0}"
 case "$KEEP_BROWSER" in
     0|1) ;;
     *)
@@ -18,6 +25,59 @@ case "$KEEP_BROWSER" in
         exit 2
         ;;
 esac
+
+KEEP_TUI="${2:-1}"
+case "$KEEP_TUI" in
+    0|1) ;;
+    *)
+        echo "ERROR: KEEP_TUI must be 0 or 1 (got '$KEEP_TUI')" >&2
+        exit 2
+        ;;
+esac
+
+# --- Expected Hermes release -------------------------------------------------
+# Every anchored patch below matches the exact pinned release, so a version
+# bump must be detected once, clearly, rather than failing some arbitrary
+# patch in the middle of a prune (see the "Updating Hermes" section in the
+# README). Bump EXPECTED_HERMES_VERSION FIRST when changing HERMES_IMAGE, then
+# re-run the build and reconcile each patch against the new release.
+EXPECTED_HERMES_VERSION="v2026.9.14"
+EXPECTED_HERMES_PY_VERSION="0.21.3"
+/opt/hermes/.venv/bin/python3 - "$EXPECTED_HERMES_VERSION" "$EXPECTED_HERMES_PY_VERSION" <<'PYBLOCK'
+import json, pathlib, sys, tomllib
+
+want_tag, want_py = sys.argv[1], sys.argv[2]
+
+# Authoritative marker baked by the upstream Dockerfile
+# (/etc/hermes/image-provenance.json, chmod 444): {"...","version":"<pyproject>"}.
+marker = pathlib.Path("/etc/hermes/image-provenance.json")
+if marker.is_file():
+    try:
+        got = json.loads(marker.read_text(encoding="utf-8")).get("version")
+    except (json.JSONDecodeError, OSError):
+        got = None
+    if str(got) == want_py:
+        print(f"prune verify: Hermes provenance version {got} (~ {want_tag}) OK")
+        raise SystemExit(0)
+    print(f"ERROR: provenance marker reports version {got!r}; this template targets "
+          f"{want_tag} ({want_py}).", file=sys.stderr)
+    print("       Bump EXPECTED_HERMES_VERSION and reconcile every anchored patch before pruning.", file=sys.stderr)
+    raise SystemExit(1)
+
+# Fallback: read the pyproject version directly (same mechanism as the marker).
+ppt = pathlib.Path("/opt/hermes/pyproject.toml")
+if not ppt.is_file():
+    raise SystemExit("ERROR: cannot determine Hermes version (no /etc/hermes/image-provenance.json, no /opt/hermes/pyproject.toml)")
+try:
+    got = tomllib.loads(ppt.read_text(encoding="utf-8"))["project"]["version"]
+except (tomllib.TOMLDecodeError, KeyError, OSError) as exc:
+    raise SystemExit(f"ERROR: could not parse /opt/hermes/pyproject.toml: {exc}")
+if str(got) != want_py:
+    print(f"ERROR: pyproject version {got!r}; this template targets {want_tag} ({want_py}).", file=sys.stderr)
+    print("       Bump EXPECTED_HERMES_VERSION and reconcile every anchored patch before pruning.", file=sys.stderr)
+    raise SystemExit(1)
+print(f"prune verify: Hermes pyproject version {got} (~ {want_tag}) OK")
+PYBLOCK
 
 before=$(du -sm / 2>/dev/null | cut -f1)
 
@@ -47,6 +107,29 @@ rm_group "ui-tui TS source" \
     /opt/hermes/ui-tui/tsconfig.build.json \
     /opt/hermes/ui-tui/vitest.config.ts \
     /opt/hermes/ui-tui/eslint.config.mjs
+
+# --- Optional: strip the in-browser Chat tab runtime (KEEP_TUI=0) ----------
+# The dashboard Chat tab is the only runtime consumer of Node in a
+# Telegram-only deployment (verified: gateway/platforms/*, boot hooks
+# docker/stage2-hook.sh, cont-init.d and s6-rc.d have no node/npm usage; the
+# WhatsApp/photon adapters that also used node are already removed above).
+# With KEEP_TUI=0 we drop node itself and the bundled TUI it runs. The Python
+# launch plumbing is DELIBERATELY KEPT: web_server.py and web_routers/audio.py
+# import web_server_chat at module level, so deleting those modules would
+# crash the dashboard at boot. Instead, with node gone the Chat tab launcher
+# hits upstream's own designed degradation — _tui_node_bin() exits 1 and
+# chat_ws catches the SystemExit and closes the WS with a clear reason — so
+# the tab fails closed rather than breaking the dashboard. `hermes --tui`
+# also goes dark (opt-out semantics). Browsers (KEEP_BROWSER) do not need
+# node.
+if [ "$KEEP_TUI" = "0" ]; then
+    rm_group "node runtime (KEEP_TUI=0)" \
+        /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx \
+        /usr/local/lib/node_modules
+    rm_group "TUI bundle (KEEP_TUI=0)"    /opt/hermes/ui-tui
+else
+    echo "  KEPT: node + in-browser Chat tab TUI (KEEP_TUI=1)"
+fi
 
 # --- Out-of-scope messaging platforms (Telegram is the only target) --------
 # The user removed WhatsApp + iMessage/Photon from scope. This template must
@@ -237,13 +320,26 @@ else
         /usr/bin/xkbevd /usr/share/X11
 fi
 
+# --- Browser-prune fail-fast --------------------------------------------------
+# If KEEP_BROWSER=0 the Playwright/Chromium tree must actually be gone. A
+# dangling selector (e.g. an upstream layout change that moved the browser
+# tree) would otherwise fail silently here and only surface later as a
+# surprise --browser-enabled path (and a size regression) on the $5 tier.
+# Fail fast, and say WHICH tree survived so a layout change is actionable.
+if [ "$KEEP_BROWSER" = "0" ] && [ -d /opt/hermes/.playwright ]; then
+    echo "ERROR: KEEP_BROWSER=0 but /opt/hermes/.playwright still exists — the browser tree" >&2
+    echo "       was not pruned (upstream layout changed?). Wire the new location into the" >&2
+    echo "       KEEP_BROWSER prune list above." >&2
+    exit 1
+fi
+
 # --- Shared-library integrity sweep -----------------------------------------
 # Every prune above must leave no runtime binary or venv native extension with
 # an unresolvable DT_NEEDED dependency. A "not found" line fails the build —
 # this is what makes the aggressive toolchain/GUI pruning safe.
 missing=$( {
     ldd "$(command -v python3)" 2>/dev/null
-    ldd /usr/local/bin/node 2>/dev/null
+    [ "$KEEP_TUI" = "1" ] && ldd /usr/local/bin/node 2>/dev/null
     ldd /opt/hermes/.venv/bin/python3 2>/dev/null
     find /opt/hermes/.venv -type f -name '*.so' -print0 2>/dev/null \
         | xargs -0 -r -n 200 ldd 2>/dev/null
@@ -337,6 +433,122 @@ grep -qF '    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part i
 sed -i 's|^    return any(part\.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path\.parts)$|    if len(path.parts) >= 2 and path.parts[0] == "/" and path.parts[1] == "proc":\n        return True\n    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)|' "$_fsfiles"
 echo "  hardened: dashboard file browser blocks /proc (sensitive-path guard)"
 
+# --- Security repair / gate: known-vulnerable venv packages ------------------
+# The pinned release's frozen dependency set contains three packages the
+# dashboard security audit flagged, with these upgrades:
+#
+#   anyio     4.12.1  ->  4.14.2   GHSA-82r6-8w77-94w6 (CRITICAL)
+#                                + GHSA-5p39-cfhj-2xmp (MODERATE)
+#   httpx2    2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH, fixed 2.10.0)
+#                                + GHSA-8xx6-hgc6-gc2m (HIGH, fixed 2.12.0)
+#                                + remaining MODERATE/UNKNOWN findings (fixed <= 2.12.0)
+#   httpcore2 2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH) + PYSEC-2026-3844 (UNKNOWN)
+#
+# httpx2==2.12.0 requires httpcore2==2.12.0 exactly and anyio>=4.10 (confirmed
+# via PyPI metadata). anyio 4.14.2 requires no new transitive (idna>=2.8, already
+# locked at 3.18; typing-extensions only for py<3.13). All three are pure-Python
+# wheels, so we swap them in-place deterministically: download -> SHA-256 verify
+# -> unzip the wheel's top-level package dir + dist-info over the venv.
+#
+# The block is a GATE first: it aborts the build unless the venv still matches
+# the exact pinned vulnerable set being targeted (so a future Hermes bump, with
+# the advisories already fixed upstream, cannot apply a now-wrong swap). The fix
+# runs in stage 1, so the corrected venv is captured by the stage-2 flatten COPY.
+mkdir -p /run/venv-wheels
+cat > /run/venv-swap.py <<'PYBLOCK'
+import hashlib
+import importlib.metadata
+import os
+import shutil
+import urllib.request
+import zipfile
+
+VENV = "/opt/hermes/.venv"
+_lib = os.path.join(VENV, "lib")
+_pydirs = [p for p in os.listdir(_lib) if p.startswith("python")]
+SP = os.path.join(_lib, _pydirs[0], "site-packages")
+WHEEL_DIR = "/run/venv-wheels"
+
+# dist_name -> (module_dir, fixed_version, sha256, wheel url)
+PINS = {
+    "anyio": (
+        "anyio", "4.14.2",
+        "9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494",
+        "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl",
+    ),
+    "httpx2": (
+        "httpx2", "2.12.0",
+        "cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36",
+        "https://files.pythonhosted.org/packages/c8/95/411ba65569158e862368917aaf56597f3e5fa3b91b0502919638465a08f3/httpx2-2.12.0-py3-none-any.whl",
+    ),
+    "httpcore2": (
+        "httpcore2", "2.12.0",
+        "7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb",
+        "https://files.pythonhosted.org/packages/d2/74/d370e55600d9bcfa0d9794b0166126d49291a3d2b20c268fc98c453a4948/httpcore2-2.12.0-py3-none-any.whl",
+    ),
+}
+
+installed = {
+    d.metadata["Name"].lower(): d.version
+    for d in importlib.metadata.distributions(path=[SP])
+}
+
+# GATE: only proceed if we recognise the exact vulnerable set being patched.
+expected_vuln = {"anyio": "4.12.1", "httpx2": "2.7.0", "httpcore2": "2.7.0"}
+for name, (mod, want, want_sha, url) in PINS.items():
+    cur = installed.get(name)
+    if cur != expected_vuln[name]:
+        raise SystemExit(
+            f"venv-verify: '{name}' is {cur!r}, expected {expected_vuln[name]!r} — "
+            f"this blocker targets the pinned Hermes release; reconcile it before pruning."
+        )
+
+def _fetch(url, sha, dest):
+    if os.path.exists(dest) and hashlib.sha256(open(dest, "rb").read()).hexdigest() == sha:
+        return
+    req = urllib.request.Request(url, headers={"User-Agent": "hermes-lite-template"})
+    with urllib.request.urlopen(req, timeout=180) as r:
+        data = r.read()
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise SystemExit(f"venv-fix: SHA-256 mismatch for {dest} (aborting)")
+    with open(dest, "wb") as f:
+        f.write(data)
+
+for name, (mod, want, want_sha, url) in PINS.items():
+    whl = os.path.join(WHEEL_DIR, f"{name}-{want}.whl")
+    _fetch(url, want_sha, whl)
+    stage = whl + ".u"
+    shutil.rmtree(stage, ignore_errors=True)
+    os.makedirs(stage)
+    with zipfile.ZipFile(whl) as z:
+        z.extractall(stage)
+    shutil.rmtree(os.path.join(SP, mod), ignore_errors=True)
+    shutil.copytree(os.path.join(stage, mod), os.path.join(SP, mod))
+    for stale in os.listdir(SP):
+        if stale.startswith(name + "-") and stale.endswith(".dist-info"):
+            shutil.rmtree(os.path.join(SP, stale), ignore_errors=True)
+    shutil.copytree(
+        os.path.join(stage, f"{name}-{want}.dist-info"),
+        os.path.join(SP, f"{name}-{want}.dist-info"),
+    )
+    print(f"venv-fix: {name} {expected_vuln[name]} -> {want}")
+
+# Post-swap smoke: imports must resolve against the fixed copies.
+import importlib
+for name, (mod, want, _sha, _url) in PINS.items():
+    importlib.import_module(mod)
+print("venv-fix: all three swapped and importable")
+PYBLOCK
+
+/opt/hermes/.venv/bin/python3 /run/venv-swap.py || {
+    echo "ERROR: venv security gate failed (see output above). If you bumped HERMES_IMAGE," >&2
+    echo "       reconcile this block against the new release's dependency set." >&2
+    exit 1
+}
+rm -rf /run/venv-wheels /run/venv-swap.py
+echo "  secured: venv anyio/httpx2/httpcore2 upgraded to fixed releases"
+
+
 after=$(du -sm / 2>/dev/null | cut -f1)
 echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER})"
 
@@ -350,8 +562,10 @@ HERMES_WRITE_SAFE_ROOT=/tmp/prune-verify-home \
 HERMES_DASHBOARD_FILES_ROOT=/ \
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=verify \
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=verify-password \
+KEEP_TUI="$KEEP_TUI" \
 /opt/hermes/.venv/bin/python3 - <<'PY'
 import importlib
+import os
 import pathlib
 import sys
 
@@ -367,12 +581,16 @@ for module in (
 
 must = [
     "/opt/hermes/hermes_cli/web_dist/index.html",
-    "/opt/hermes/ui-tui/dist/entry.js",
-    "/opt/hermes/ui-tui/package.json",
     "/opt/hermes/docker/entrypoint-dispatch.sh",
     "/opt/hermes/docker/main-wrapper.sh",
     "/etc/s6-overlay/s6-rc.d/dashboard/run",
 ]
+# TUI assets are only required when the Chat tab runtime was kept.
+if os.environ.get("KEEP_TUI") == "1":
+    must += [
+        "/opt/hermes/ui-tui/dist/entry.js",
+        "/opt/hermes/ui-tui/package.json",
+    ]
 missing = [p for p in must if not pathlib.Path(p).exists()]
 if missing:
     sys.exit("prune broke the image, missing: " + ", ".join(missing))
@@ -384,18 +602,22 @@ PY
 # whole bundle, prints 'hermes-tui: no TTY' and exits 0 — a corrupt or
 # incomplete bundle dies non-zero before that point. Run it exactly the way
 # the launcher's fast path does (node --expose-gc).
-tui_probe=$(/usr/local/bin/node --expose-gc /opt/hermes/ui-tui/dist/entry.js </dev/null 2>&1) || {
-    echo "ERROR: TUI bundle probe crashed (exit=$?):" >&2
-    echo "$tui_probe" >&2
-    exit 1
-}
-case "$tui_probe" in
-    *"hermes-tui: no TTY"*) echo "prune verify: TUI bundle loads" ;;
-    *)
-        echo "ERROR: TUI bundle probe gave unexpected output: $tui_probe" >&2
+if [ "$KEEP_TUI" = "1" ]; then
+    tui_probe=$(/usr/local/bin/node --expose-gc /opt/hermes/ui-tui/dist/entry.js </dev/null 2>&1) || {
+        echo "ERROR: TUI bundle probe crashed (exit=$?):" >&2
+        echo "$tui_probe" >&2
         exit 1
-        ;;
-esac
+    }
+    case "$tui_probe" in
+        *"hermes-tui: no TTY"*) echo "prune verify: TUI bundle loads" ;;
+        *)
+            echo "ERROR: TUI bundle probe gave unexpected output: $tui_probe" >&2
+            exit 1
+            ;;
+    esac
+else
+    echo "prune verify: TUI intentionally removed (KEEP_TUI=0)"
+fi
 
 # Bind 0.0.0.0 (still reachable only from inside the build container) so the
 # production auth gate — non-loopback bind + required provider, fail-closed —
@@ -446,10 +668,9 @@ rm -rf /tmp/prune-verify-home
 # creates nothing under /data, and the smoke test above ran with a
 # throwaway HERMES_HOME under /tmp — so /data must not exist (or be empty)
 # in the pruned image.
-stray=$(find /data -mindepth 1 -print 2>/dev/null | head -5)
-if [ -n "$stray" ]; then
+if [ -d /data ] && [ -n "$(ls -A /data 2>/dev/null)" ]; then
     echo "ERROR: state baked into the /data volume mountpoint:" >&2
-    echo "$stray" >&2
+    ls -A /data | head -5 >&2
     exit 1
 fi
 echo "prune verify: /data clean"

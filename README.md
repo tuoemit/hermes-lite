@@ -111,6 +111,18 @@ gateway (≈200–400 MB under load) + dashboard (≈100–200 MB) already fill 
 adds ≈150–300 MB per page and the free-tier disk quota cannot hold the browser stack. Enable only on a
 ≥2 GB plan by building with `KEEP_BROWSER=1`.
 
+## In-browser Chat tab — kept by default
+
+The dashboard's embedded Chat tab (`/chat`, `/api/pty`) — which also powers `hermes --tui` from a shell —
+runs on the Node runtime and the prebuilt TUI bundle. Those are **kept** by default because the tab is
+part of the normal dashboard experience.
+
+If you never use the embedded chat, build with `KEEP_TUI=0` to strip Node (`node`/`npm`/`npx`) and the
+TUI bundle (the largest single-purpose Node consumer). The Chat tab then fails *closed* with a clear
+"Chat unavailable" message instead of crashing, and `hermes --tui` goes dark — this is the intended
+opt-out trade. Browser automation (`KEEP_BROWSER`) does **not** require Node, so the two flags are
+independent.
+
 ---
 
 ## Ports & health checks
@@ -134,6 +146,9 @@ GET /api/health
 - The dashboard file browser is confined to `/data/.hermes` (`HERMES_DASHBOARD_FILES_ROOT`); the spot
   editor additionally denies `/proc` (sensitive-path guard) — so dashboard-UI access cannot read
   `/proc/<pid>/environ`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
+- The build upgrades the frozen dependency set's three known-vulnerable HTTP-stack packages to their
+  fixed releases (`anyio` 4.12.1→4.14.2, `httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0) with
+  SHA-256-verified wheels, and fails closed if the pinned image ever drifts from the set it targets.
 - Keep all credentials in Railway **secret** variables. The boot hook seeds `$HERMES_HOME/.env` with
   mode `0600`.
 - The image base is pinned by digest (tag + `@sha256:…`) for reproducible builds.
@@ -222,10 +237,14 @@ default-preserving option, not a template change.
 
 ## Updating Hermes
 
-1. Change the `HERMES_IMAGE` build-arg (tag + digest) to the new released version;
-2. re-verify every prune rule and the anchored patches in `prune.sh` against the new image
-   (the script exits non-zero if an anchored upstream line drifted);
-3. rebuild and test before deploying.
+1. Change `HERMES_IMAGE` (tag + digest) and bump `EXPECTED_HERMES_VERSION` / `EXPECTED_HERMES_PY_VERSION`
+   at the top of `prune.sh` to the new released version;
+2. re-verify every prune rule and the anchored patches in `prune.sh` against the new image — the script
+   now fails up front on the version gate, and each anchored patch (`gateway/run.py`, `files.py`,
+   `main-wrapper.sh`, `dashboard/run`) exits non-zero if its upstream line drifted;
+3. reconcile the venv security block: if the new release already ships fixed `anyio`/`httpx2`/`httpcore2`,
+   the block aborts the build (by design) — remove it or re-target it to the release's actual set;
+4. rebuild and test before deploying.
 
 ---
 
@@ -233,9 +252,9 @@ default-preserving option, not a template change.
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; Railway runtime env. |
-| `prune.sh` | Removes build-only + out-of-scope content, aligns `HOME` with `HERMES_HOME`, verifies the pruned runtime (imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
-| `railway-entrypoint.sh` | Validates `PORT`, preflights dashboard auth (fail-fast), logs a boot banner, delegates to Hermes' dispatcher. |
+| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; `KEEP_BROWSER`/`KEEP_TUI` build-args; Railway runtime env. |
+| `prune.sh` | Removes build-only + out-of-scope content, aligns `HOME` with `HERMES_HOME`, upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
+| `railway-entrypoint.sh` | Validates `PORT`, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
 | `README.md` | This guide. |
 

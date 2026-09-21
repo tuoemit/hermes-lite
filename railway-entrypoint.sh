@@ -66,6 +66,38 @@ case "${HERMES_DASHBOARD:-1}" in
         ;;
 esac
 
+# ---- Command-launcher for `hermes doctor` (and PATH-less shells) -----------
+# `hermes doctor` runs `_check_command_installation`, which expects the
+# pip-install layout: the venv entry point PLUS a `$HOME/.local/bin/hermes`
+# symlink pointing at it. The Docker image legitimately ships
+# /opt/hermes/bin/hermes (the root-drop exec shim) first on PATH instead, so
+# in this layout the "Missing ~/.local/bin/hermes symlink" finding is a
+# false positive BY DESIGN — the launch surface here is the shim, not the
+# `pip install -e` symlink the check models.
+#
+# Rather than dismissing the finding we make it pass truthfully: create the
+# same symlink `hermes doctor --fix` would create (target = the venv entry
+# point) at the RUNTIME home. It also survives the ephemeral re-deploy case,
+# where a one-off `--fix` would otherwise be wiped on every fresh
+# (no-volume) restart and the warning would return. Everything here is
+# best-effort: it MUST NOT be able to fail the Pod boot, and it deliberately
+# does not chown (stage2-hook may usermod the hermes UID afterwards, so any
+# pre-remap chown here would dangle). The symlink is only consulted when the
+# shim is not first on PATH; the shim (which re-execs the venv binary by
+# absolute path) still takes precedence and keeps its root-drop contract.
+: "${HERMES_HOME:=/data/.hermes}"
+if [ -x /opt/hermes/.venv/bin/hermes ]; then
+    (
+        link_dir="$HERMES_HOME/.local/bin"
+        target="/opt/hermes/.venv/bin/hermes"
+        if [ ! -e "$link_dir/hermes" ]; then
+            mkdir -p "$link_dir" 2>/dev/null \
+                && ln -s "$target" "$link_dir/hermes" 2>/dev/null \
+                && echo "[railway-entrypoint] created $link_dir/hermes -> $target (satisfies 'hermes doctor' command-installation check)"
+        fi
+    ) || true
+fi
+
 # Startup banner for Railway log triage: the values that matter at a glance.
 if [ "$basic_ok" = 1 ]; then
     auth_label="basic"

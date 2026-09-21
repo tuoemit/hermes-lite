@@ -24,8 +24,16 @@ RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLit
 # Set to 1 only if you need Playwright/Chromium browser tools.
 ARG KEEP_BROWSER=0
 
+# In-browser Chat tab: KEPT by default (node + the prebuilt TUI bundle are its
+# runtime). Set to 0 only if you never use the dashboard's embedded chat and
+# want the Node runtime stripped — this removes node/npm and the TUI bundle,
+# so `hermes --tui` and the dashboard Chat tab stop working (the tab fails
+# closed with a clean "Chat unavailable" instead of crashing the dashboard).
+# Browsers (KEEP_BROWSER) have no node dependency either way.
+ARG KEEP_TUI=1
+
 COPY --chmod=0755 prune.sh /prune.sh
-RUN /prune.sh "${KEEP_BROWSER}" && rm -f /prune.sh
+RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
 
 # ---------------------------------------------------------------------------
 # Stage 2 — flatten the pruned tree into a fresh image.
@@ -34,6 +42,10 @@ FROM scratch AS runtime
 COPY --from=pruned / /
 
 # --- Hermes runtime environment -------------------------------------------
+# HERMES_TUI_DIR stays set unconditionally: with KEEP_TUI=1 (default) it points
+# at the prebuilt bundle; with KEEP_TUI=0 the bundle is pruned and the Chat tab
+# launcher fails CLEANLY (chat_ws catches the SystemExit and returns a 4xx-style
+# WS close), which is the documented behavior for opting the tab out.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright \
