@@ -30,7 +30,7 @@ ARG KEEP_BROWSER=0
 # so `hermes --tui` and the dashboard Chat tab stop working (the tab fails
 # closed with a clean "Chat unavailable" instead of crashing the dashboard).
 # Browsers (KEEP_BROWSER) have no node dependency either way.
-ARG KEEP_TUI=1
+ARG KEEP_TUI=0
 
 COPY --chmod=0755 prune.sh /prune.sh
 RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
