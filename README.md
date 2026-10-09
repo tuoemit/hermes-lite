@@ -277,8 +277,9 @@ gateway's user:
 runuser -u hermes -- env HOME=/data HERMES_HOME=/data/.hermes hermes doctor
 ```
 
-The dashboard's Doctor button runs as `hermes` with the container's `HERMES_HOME`, so it should not show
-this warning. If the `hermes`-user doctor run also reports no gateway, the gateway is really down. See
+The dashboard's Doctor button uses `TERMINAL_HOME_MODE=real` (set in the image), so it keeps `HOME=/data`
+and finds the gateway record. Upstream's default would move it into `/data/.hermes/home`, which is what
+caused the warning in the dashboard. If the `hermes`-user doctor run also reports no gateway, the gateway is really down. See
 "Dashboard up, but the bot is dark" above.
 
 **Free-tier reality check**

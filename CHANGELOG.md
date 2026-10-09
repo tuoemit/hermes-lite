@@ -22,6 +22,12 @@
 - *Root uses the same home.* The image sets `HOME=/data` for every process, not only the services. A direct root
   run of the venv binary (for example `/opt/hermes/.venv/bin/hermes doctor`) previously used `HOME=/root`, which
   looked in the wrong lock dir and reported "No host gateway owns the gateway role" while the gateway was up.
+- *Dashboard Doctor.* Upstream's dashboard actions (Doctor, Security audit, Prompt size, backups) run with
+  `HOME=$HERMES_HOME/home` once that folder exists, so the Doctor could not find the gateway record and reported
+  "No host gateway owns the gateway role" while the gateway was up. The image sets `TERMINAL_HOME_MODE=real`,
+  so these actions and the agent's tool subprocesses use `HOME=/data`. Agent shell commands therefore see `~` as
+  `/data` (the folder containing `.hermes`), not `/data/.hermes/home`. Set `TERMINAL_HOME_MODE` in Railway to
+  change it.
 - *Moved state.* The XDG state (`.local/state`, including the gateway lock record) moves from
   `/data/.hermes/.local` to `/data/.local`. Existing volumes keep their data; the old `.local` folder is inert.
 

@@ -77,6 +77,10 @@ ENV PYTHONUNBUFFERED=1 \
     # HOME=/root cannot see the gateway). ~/.hermes is therefore /data/.hermes. HERMES_HOME is set to
     # that same path explicitly because the upstream startup scripts read it.
     HOME=/data \
+    # Upstream runs dashboard actions and tool subprocesses with HOME=$HERMES_HOME/home once that
+    # folder exists. Then the dashboard Doctor looked for the gateway record there and reported
+    # "No host gateway owns the gateway role". "real" keeps HOME=/data for them too.
+    TERMINAL_HOME_MODE=real \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
     # HERMES_DASHBOARD_FILES_ROOT is intentionally unset: setting it locks the dashboard file browser
