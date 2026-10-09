@@ -467,30 +467,104 @@ rm -rf /opt/data
 ln -s /data/.hermes /opt/data
 echo "  linked: /opt/data -> /data/.hermes"
 
-# --- Dashboard file-browser hardening: block /proc from the spot editor -----
-# The dashboard's /api/fs/* routes (spot editor / terminal helper) resolve
-# arbitrary absolute paths and do NOT honor HERMES_DASHBOARD_FILES_ROOT. Their
-# read-side guard (hermes_cli/web_routers/files.py::_is_sensitive_path) blocks
-# credential basenames but not /proc. Because dashboard + gateway share the
-# hermes uid, /proc/<pid>/environ is owner-readable and would expose every
-# container secret (Telegram token, model keys, the dashboard password) to an
-# authenticated dashboard user through the UI.
-#
-# Fix: teach _is_sensitive_path to reject the ABSOLUTE /proc root subtree
-# (path.parts[0]=="/" and parts[1]=="proc"). Scoped precisely to /proc so a
-# legitimately named "<workdir>/proc" directory is unaffected. The browser tab
-# (managed /api/files/*) is already confined to
-# HERMES_DASHBOARD_FILES_ROOT=/data/.hermes, so this only hardens the spot
-# editor routes. Gateway-side /proc diagnostics are untouched (this module is
-# dashboard-only). Anchor on the exact upstream line so a version bump fails
+# --- Dashboard/gateway child launches: run on the image venv, not the store ---
+# Upstream v0.21.6 defect in docker images: hermes_cli/_launchers.py::runtime_command
+# starts every child process (dashboard doctor / security-audit / prompt-size /
+# backup, gateway lifecycle) on the managed store Python whenever the store records
+# one, which this image always does. A docker image records no committed dependency
+# environment, so pm.environments refuses that child at boot with "no dependency
+# environment is committed for this install; run `hermes pm repair`". The image venv
+# (/opt/hermes/.venv) is built from that same managed interpreter, so launching the
+# child there is ABI-identical and is what the CLI already runs on. Anchored patch:
+# a drifted upstream line fails the build here rather than shipping the bug.
+python3 - /opt/hermes/hermes_cli/_launchers.py <<'PYPATCH' || {
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+src = path.read_text(encoding="utf-8")
+old = "    python = python or resolve_store_python(root) or Path(sys.executable)\n"
+if src.count(old) != 1:
+    print("ERROR: runtime_command anchor not found exactly once", file=sys.stderr)
+    sys.exit(1)
+new = (
+    "    store_python = resolve_store_python(root)\n"
+    "    python = python or store_python or Path(sys.executable)\n"
+    "    # hermes-lite (docker): no committed dependency environment exists for this image, so\n"
+    "    # a child on the store Python is refused by pm.environments._require_own_dependencies.\n"
+    "    # Use the image's own venv instead (same managed interpreter, so the same ABI).\n"
+    "    if store_python is not None and python == store_python:\n"
+    "        image_python = root / \".venv\" / \"bin\" / \"python\"\n"
+    "        try:\n"
+    "            from pm.environments import committed_venv\n"
+    "            committed = committed_venv(root)\n"
+    "        except (ImportError, OSError, RuntimeError, ValueError):\n"
+    "            committed = True  # unreadable state: keep upstream behaviour, never guess\n"
+    "        if committed is None and image_python.is_file():\n"
+    "            python = image_python\n"
+)
+path.write_text(src.replace(old, new, 1), encoding="utf-8")
+print("  patched: dashboard/gateway children launch on the image venv (no committed env)")
+PYPATCH
+    echo "ERROR: _launchers.py runtime_command anchor drifted — update this patch for the pinned Hermes release" >&2
+    exit 1
+}
+
+# Verify that exactly the launch path the dashboard uses now boots. A throwaway
+# HERMES_HOME keeps install state out of the image. Failure stops the build.
+LAUNCH_HOME="$(mktemp -d)"
+LAUNCH_OUT="$(HERMES_HOME="$LAUNCH_HOME" /opt/hermes/.venv/bin/python -c '
+import subprocess, sys
+from pathlib import Path
+sys.path.insert(0, "/opt/hermes")
+from hermes_cli._launchers import runtime_command
+argv = runtime_command(Path("/opt/hermes"), ["--version"])
+r = subprocess.run(argv, capture_output=True, text=True, timeout=180, stdin=subprocess.DEVNULL)
+out = r.stdout + r.stderr
+if r.returncode != 0 or "no dependency environment" in out:
+    print(out, file=sys.stderr)
+    sys.exit(1)
+print("ok:", argv[0])
+' 2>&1)" || {
+    echo "ERROR: dashboard child launch check failed:" >&2
+    echo "$LAUNCH_OUT" >&2
+    rm -rf "$LAUNCH_HOME"
+    exit 1
+}
+rm -rf "$LAUNCH_HOME"
+echo "  verified: dashboard child launch path boots ($LAUNCH_OUT)"
+
+# --- Dashboard file-browser hardening: keep secrets out of the file browser --
+# The dashboard file browser (/api/files/*) and spot editor (/api/fs/*) gate
+# listings and reads through hermes_cli/web_routers/files.py::_is_sensitive_path.
+# Upstream denies credential basenames (.env, auth.json, config.yaml, ...) and
+# the mcp-tokens/ and pairing/ trees, but not the paths below. This template
+# leaves HERMES_DASHBOARD_FILES_ROOT unset, so the browser is unlocked: it opens
+# at $HOME (/data/.hermes) and can go up to /. The guard is therefore extended to:
+#   /proc  (absolute root)  /proc/<pid>/environ exposes every container secret
+#                           (Telegram token, model keys, dashboard password).
+#   /run   (absolute root)  s6-overlay writes each container env var to
+#                           /run/s6/container_environment/<NAME> (Railway secrets).
+#   .dash  (any component)  the dashboard session-signing secret is stored at
+#                           $HERMES_HOME/.dash/signing-secret; a reader could
+#                           forge dashboard session cookies.
+# Gateway-side /proc diagnostics are untouched (this module is dashboard-only).
+# Each patch is anchored on the exact upstream line, so a version bump fails
 # the build instead of silently drifting.
 _fsfiles=/opt/hermes/hermes_cli/web_routers/files.py
 grep -qF '    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)' "$_fsfiles" || {
     echo 'ERROR: sensitive-path guard line not found in hermes_cli/web_routers/files.py — update this patch for the pinned Hermes release' >&2
     exit 1
 }
-sed -i 's|^    return any(part\.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path\.parts)$|    if len(path.parts) >= 2 and path.parts[0] == "/" and path.parts[1] == "proc":\n        return True\n    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)|' "$_fsfiles"
-echo "  hardened: dashboard file browser blocks /proc (sensitive-path guard)"
+grep -qF '_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})' "$_fsfiles" || {
+    echo 'ERROR: sensitive directory denylist not found in hermes_cli/web_routers/files.py — update this patch for the pinned Hermes release' >&2
+    exit 1
+}
+sed -i 's|^    return any(part\.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path\.parts)$|    if len(path.parts) >= 2 and path.parts[0] == "/" and path.parts[1] in ("proc", "run"):\n        return True\n    return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)|' "$_fsfiles"
+sed -i 's|^_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})$|_SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing", ".dash"})|' "$_fsfiles"
+grep -qF 'path.parts[1] in ("proc", "run")' "$_fsfiles" && grep -qF '"pairing", ".dash"' "$_fsfiles" || {
+    echo 'ERROR: sensitive-path guard patch did not apply' >&2
+    exit 1
+}
+echo "  hardened: file browser and spot editor deny /proc, /run and .dash (sensitive-path guard)"
 
 # --- Security repair / gate: known-vulnerable venv packages ------------------
 # The v0.21.6 frozen dependency set still ships two packages the dashboard

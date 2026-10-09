@@ -43,6 +43,9 @@ notes ship with v0.22.0. Highlights that matter for this template:
 - Pin moved to `v0.21.6` (tag + multi-arch index digest).
 - Environment aligned with upstream: `PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools`, added `HERMES_RUNTIME_DIR`,
   `HERMES_PYTHON`, `XDG_RUNTIME_DIR`. Removed the dead `HERMES_LAZY_INSTALL_TARGET`.
+- *Dashboard file browser unlocked.* `HERMES_DASHBOARD_FILES_ROOT=/data/.hermes` is commented out, not deleted. Setting it
+  locked the browser to that folder (no parent navigation). Unset, the browser opens at `$HOME` (`/data/.hermes`) and
+  can move freely through directories. To lock it again, uncomment the line.
 
 **prune.sh**
 - *Version gate* reads `/opt/hermes/install-stamp.json` (`displayVersion` and `baseVersion` must equal `0.21.6`).
@@ -65,6 +68,20 @@ notes ship with v0.22.0. Highlights that matter for this template:
   the venv and the managed Python.
 - *Venv security gate*: `anyio` is gate-only (must be `>= 4.14.2`). Only `httpx2` and `httpcore2` are swapped. Both
   wheels were re-verified against their pinned SHA-256 hashes.
+- *Dashboard/gateway child launches fixed.* Upstream v0.21.6 starts every child process (dashboard Doctor, Security
+  audit, Prompt size, Backup, gateway lifecycle) on the managed store Python whenever the store records one, which
+  the image always does. A Docker image records no committed dependency environment, so the child was refused with
+  "no dependency environment is committed for this install; run `hermes pm repair`". `hermes pm repair` would
+  rebuild the whole environment, so it is not the fix. The patch makes those children run on the image venv
+  (`/opt/hermes/.venv`, built from the same managed interpreter) when nothing is committed. The anchored patch
+  fails the build if the upstream line drifts, and a build-time check runs the dashboard launch path.
+- *Dashboard file-browser guard extended.* The sensitive-path guard (which already blocked `/proc`) now also blocks:
+  - `/run`: s6-overlay writes every container environment variable (Railway secrets such as `TELEGRAM_BOT_TOKEN`) to
+    `/run/s6/container_environment/<NAME>`.
+  - any `.dash` folder: the dashboard session-signing secret is stored at `$HERMES_HOME/.dash/signing-secret`. A reader
+    could forge dashboard session cookies.
+  The guard applies to the file browser (list and read) and the spot editor. `/data/.hermes` and the rest of the tree
+  stay browsable.
 - *Cleanup*: `PYTHONDONTWRITEBYTECODE=1` for the whole script, and `__pycache__` is removed after the verification
   imports.
 
@@ -92,8 +109,17 @@ Done in this sandbox (no Docker daemon is available, so the Dockerfile itself wa
 - Second configuration, `KEEP_BROWSER=1 KEEP_TUI=1` (browser and Chat tab kept): exit 0. The TUI bundle probe
   loads. The sandbox cannot mount `/proc`, so this run used a `/proc/self/{stat,statm}` shim that Node reads for
   `process.memoryUsage()`. Real containers always have `/proc`. Root filesystem: 3,184 MB → 2,297 MB.
+- Dashboard child launch path, against the pruned trees (both configurations): `--version`, `prompt-size`, and
+  `security audit` launch with no refusal. The build-time check runs the same path before the image is sealed.
 - Managed Python SQLite 3.53.1 (passes the 3.51.3 gate); `hermes --version` reports `0.21.6` and
   `Install method: docker`.
+
+**Known, not changed**
+- The default build (`KEEP_TUI=0`) removes Node/npm, so upstream's startup check prints
+  `install out of sync (node: not installed or outdated; npm: ...)` on each CLI command and on each gateway boot.
+  The line is accurate for this build. Use `KEEP_TUI=1` to keep Node and silence it.
+- `security audit` on the image reports `PyJWT 2.13.0` (CRITICAL, GHSA-ffc3-869f-jxw9, fixed in 2.14.0) in the venv.
+  The template does not pin PyJWT yet.
 
 **Not verified here** (needs a real environment): a `docker build`, the Railway deploy, s6 supervision (the
 gateway and dashboard as supervised services, which need root), and a live Telegram round trip.

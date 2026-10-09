@@ -74,7 +74,9 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
-    HERMES_DASHBOARD_FILES_ROOT=/data/.hermes \
+    # HERMES_DASHBOARD_FILES_ROOT=/data/.hermes is intentionally unset: setting it locks the dashboard
+    # file browser to that folder (no parent navigation). Unset, the browser opens at $HOME, which this
+    # template aligns to $HERMES_HOME (/data/.hermes), and you can go up and back freely.
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 

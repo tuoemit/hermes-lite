@@ -156,9 +156,11 @@ GET /api/health
   expose version and component health, not secrets. (Verified against v0.21.6.)
 - Dashboard login supports a **pre-hashed password** (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`) — see
   *Credential hygiene* below. Prefer it so the plaintext never enters the container environment.
-- The dashboard file browser is confined to `/data/.hermes` (`HERMES_DASHBOARD_FILES_ROOT`); the spot
-  editor additionally denies `/proc` (sensitive-path guard) — so dashboard-UI access cannot read
-  `/proc/<pid>/environ`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
+- The dashboard file browser opens at `/data/.hermes` and can move freely through the directories it can read
+  (`HERMES_DASHBOARD_FILES_ROOT` is intentionally unset in the Dockerfile; set it to lock the browser to one folder).
+  The file browser and spot editor deny `/proc`, `/run`, and any `.dash` folder (sensitive-path guard). So dashboard-UI
+  access cannot read `/proc/<pid>/environ`, the Railway secrets in `/run/s6/container_environment`, or the dashboard
+  session-signing secret in `/data/.hermes/.dash/`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
 - The build upgrades the frozen dependency set's still-vulnerable HTTP-stack packages to their fixed
   releases (`httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0) with SHA-256-verified wheels. `anyio` is
   already at the fixed 4.14.2 upstream in v0.21.6, so it is only gate-checked (the build fails if it
@@ -235,6 +237,14 @@ issue. Seeing the auth error → set the Basic Auth variables. Otherwise check m
 **Dashboard up, but the bot is dark**
 The `gateway-default` s6 slot can enter permanent-failure. From a shell run `hermes gateway start`
 (no `-p` targets the root profile slot).
+
+**Dashboard Doctor / Security audit / Prompt size shows `no dependency environment is committed`**
+This was an upstream v0.21.6 bug for Docker images (dashboard and gateway actions launched on the
+store Python). This template fixes it at build time. If you still see it, redeploy this template so the
+image is rebuilt. Do not run `hermes pm repair`: it rebuilds the whole dependency environment.
+
+**`install out of sync (node: …; npm: …)` warning**
+Expected on the default build: Node and npm are removed (`KEEP_TUI=0`). Set `KEEP_TUI=1` to keep them.
 
 **Free-tier reality check**
 Budget honestly: 0.5 GB RAM is shared by gateway + dashboard + the bot's work. Reduce concurrent load
