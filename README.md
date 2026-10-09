@@ -4,6 +4,9 @@
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) container, tuned for low-resource
 (Railway free-tier-class) hosts.
 
+> **Pinned to Hermes Agent `v0.21.6`** (`nousresearch/hermes-agent:v0.21.6`, multi-arch digest
+> `sha256:55e192fba0cd4fde61142abbff5adeacff40efdb482ccd0ff877924bd274f909`). See [CHANGELOG.md](CHANGELOG.md).
+
 - Telegram bot (the gateway) + the built-in web dashboard, supervised by Hermes' own s6-overlay.
 - WhatsApp, WhatsApp Cloud, and iMessage/Photon are **removed** by design (Telegram-only scope).
 - Browser automation is **disabled** by default (does not fit the free-tier RAM budget).
@@ -113,7 +116,8 @@ boot as upstream intends.
 
 ## Browser automation — off by default
 
-`KEEP_BROWSER=0` (default) removes Playwright/Chromium and the GUI/X11 stack. Rationale: on 0.5 GB the
+`KEEP_BROWSER=0` (default) removes the pinned Chromium (`/opt/hermes/tools/chromium-*`, the browser that
+Hermes' managed tool store ships in v0.21.x), its `agent-browser` pointer file, and the GUI/X11 stack. Rationale: on 0.5 GB the
 gateway (≈200–400 MB under load) + dashboard (≈100–200 MB) already fill the budget; Chromium headless
 adds ≈150–300 MB per page and the free-tier disk quota cannot hold the browser stack. Enable only on a
 ≥2 GB plan by building with `KEEP_BROWSER=1`.
@@ -146,14 +150,19 @@ GET /api/health
 
 ## Security notes
 
+- Dashboard login is a username/password **login form** (provider `basic`, `POST /auth/password-login`) that sets
+  signed session cookies; the `HERMES_DASHBOARD_BASIC_AUTH_*` variable names are unchanged. Protected `/api/*`
+  routes return 401 without a session. Upstream keeps `GET /api/health` and `GET /api/status` public: they
+  expose version and component health, not secrets. (Verified against v0.21.6.)
 - Dashboard login supports a **pre-hashed password** (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`) — see
   *Credential hygiene* below. Prefer it so the plaintext never enters the container environment.
 - The dashboard file browser is confined to `/data/.hermes` (`HERMES_DASHBOARD_FILES_ROOT`); the spot
   editor additionally denies `/proc` (sensitive-path guard) — so dashboard-UI access cannot read
   `/proc/<pid>/environ`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
-- The build upgrades the frozen dependency set's three known-vulnerable HTTP-stack packages to their
-  fixed releases (`anyio` 4.12.1→4.14.2, `httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0) with
-  SHA-256-verified wheels, and fails closed if the pinned image ever drifts from the set it targets.
+- The build upgrades the frozen dependency set's still-vulnerable HTTP-stack packages to their fixed
+  releases (`httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0) with SHA-256-verified wheels. `anyio` is
+  already at the fixed 4.14.2 upstream in v0.21.6, so it is only gate-checked (the build fails if it
+  ever drops below 4.14.2). The build fails closed if the pinned image drifts from the set it targets.
 - Keep all credentials in Railway **secret** variables. The boot hook seeds `$HERMES_HOME/.env` with
   mode `0600`.
 - The image base is pinned by digest (tag + `@sha256:…`) for reproducible builds.
@@ -243,14 +252,23 @@ default-preserving option, not a template change.
 
 ## Updating Hermes
 
-1. Change `HERMES_IMAGE` (tag + digest) and bump `EXPECTED_HERMES_VERSION` / `EXPECTED_HERMES_PY_VERSION`
-   at the top of `prune.sh` to the new released version;
-2. re-verify every prune rule and the anchored patches in `prune.sh` against the new image — the script
-   now fails up front on the version gate, and each anchored patch (`gateway/run.py`, `files.py`,
-   `main-wrapper.sh`, `dashboard/run`) exits non-zero if its upstream line drifted;
-3. reconcile the venv security block: if the new release already ships fixed `anyio`/`httpx2`/`httpcore2`,
-   the block aborts the build (by design) — remove it or re-target it to the release's actual set;
-4. rebuild and test before deploying.
+Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned by tag **and** digest.
+
+1. Get the digest of the new release's multi-arch index:
+   `docker buildx imagetools inspect nousresearch/hermes-agent:vX.Y.Z` (the top `Digest:` line), and set
+   `HERMES_IMAGE=nousresearch/hermes-agent:vX.Y.Z@sha256:…` in the `Dockerfile`.
+2. Bump `EXPECTED_HERMES_VERSION` (`vX.Y.Z`) and `EXPECTED_HERMES_PY_VERSION` (`X.Y.Z`) at the top of
+   `prune.sh`. The version gate reads `/opt/hermes/install-stamp.json` (`displayVersion`/`baseVersion`); the
+   `pyproject.toml` and `image-provenance.json` values are `0.0.0` placeholders in v0.21.x images.
+3. Re-verify the anchored patches in `prune.sh` against the new image. Each one exits non-zero if its upstream
+   line drifted: the `whatsapp_cloud` entry in `gateway/run.py`, the `/proc` guard in
+   `hermes_cli/web_routers/files.py`, the `HOME=/opt/data` / `cd /opt/data` lines in `dashboard/run` and
+   `main-wrapper.sh`.
+4. Check the managed tool-store paths (`/opt/hermes/tools/chromium-*`, `node-*`, `npm-*`, `ffmpeg-*`,
+   `python-*`, `ripgrep-*`) and `/etc/hermes/agent-browser-executable-path` still match the prune rules.
+5. Reconcile the venv security block: if the new release already ships fixed `httpx2`/`httpcore2`, the block
+   aborts the build by design. Remove the swap or re-target it. The `anyio` gate requires `>= 4.14.2`.
+6. Rebuild and test before deploying (`docker build`, then a deploy to a throwaway Railway service).
 
 ---
 
@@ -262,6 +280,7 @@ default-preserving option, not a template change.
 | `prune.sh` | Removes build-only + out-of-scope content, aligns `HOME` with `HERMES_HOME`, upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
 | `railway-entrypoint.sh` | Validates `PORT`, routes `ADMIN_USERNAME`/`ADMIN_PASSWORD` aliases, auto-generates the session secret, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
+| `CHANGELOG.md` | What changed in each pin bump (v0.21.3 → v0.21.6), and how it was verified. |
 | `README.md` | This guide. |
 
 ---

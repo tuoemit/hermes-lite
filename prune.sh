@@ -17,6 +17,9 @@
 # version intentionally when Hermes is upgraded.
 set -eu
 
+# Never leave bytecode behind, including from the verification imports below.
+export PYTHONDONTWRITEBYTECODE=1
+
 KEEP_BROWSER="${1:-0}"
 case "$KEEP_BROWSER" in
     0|1) ;;
@@ -41,42 +44,33 @@ esac
 # patch in the middle of a prune (see the "Updating Hermes" section in the
 # README). Bump EXPECTED_HERMES_VERSION FIRST when changing HERMES_IMAGE, then
 # re-run the build and reconcile each patch against the new release.
-EXPECTED_HERMES_VERSION="v2026.9.14"
-EXPECTED_HERMES_PY_VERSION="0.21.3"
+EXPECTED_HERMES_VERSION="v0.21.6"
+EXPECTED_HERMES_PY_VERSION="0.21.6"
 /opt/hermes/.venv/bin/python3 - "$EXPECTED_HERMES_VERSION" "$EXPECTED_HERMES_PY_VERSION" <<'PYBLOCK'
-import json, pathlib, sys, tomllib
+import json, pathlib, sys
 
 want_tag, want_py = sys.argv[1], sys.argv[2]
 
-# Authoritative marker baked by the upstream Dockerfile
-# (/etc/hermes/image-provenance.json, chmod 444): {"...","version":"<pyproject>"}.
-marker = pathlib.Path("/etc/hermes/image-provenance.json")
-if marker.is_file():
-    try:
-        got = json.loads(marker.read_text(encoding="utf-8")).get("version")
-    except (json.JSONDecodeError, OSError):
-        got = None
-    if str(got) == want_py:
-        print(f"prune verify: Hermes provenance version {got} (~ {want_tag}) OK")
-        raise SystemExit(0)
-    print(f"ERROR: provenance marker reports version {got!r}; this template targets "
-          f"{want_tag} ({want_py}).", file=sys.stderr)
-    print("       Bump EXPECTED_HERMES_VERSION and reconcile every anchored patch before pruning.", file=sys.stderr)
-    raise SystemExit(1)
-
-# Fallback: read the pyproject version directly (same mechanism as the marker).
-ppt = pathlib.Path("/opt/hermes/pyproject.toml")
-if not ppt.is_file():
-    raise SystemExit("ERROR: cannot determine Hermes version (no /etc/hermes/image-provenance.json, no /opt/hermes/pyproject.toml)")
+# Authoritative marker for the v0.21.x Docker images: /opt/hermes/install-stamp.json
+# (schemaVersion 2, "distribution": "docker", "displayVersion": "0.21.6").
+# Note: in v0.21.6 the older markers are placeholders and must NOT be trusted:
+#   - /etc/hermes/image-provenance.json reports "version": "0.0.0"
+#   - /opt/hermes/pyproject.toml reports version "0.0.0"
+stamp = pathlib.Path("/opt/hermes/install-stamp.json")
+if not stamp.is_file():
+    raise SystemExit("ERROR: cannot determine Hermes version (no /opt/hermes/install-stamp.json)")
 try:
-    got = tomllib.loads(ppt.read_text(encoding="utf-8"))["project"]["version"]
-except (tomllib.TOMLDecodeError, KeyError, OSError) as exc:
-    raise SystemExit(f"ERROR: could not parse /opt/hermes/pyproject.toml: {exc}")
-if str(got) != want_py:
-    print(f"ERROR: pyproject version {got!r}; this template targets {want_tag} ({want_py}).", file=sys.stderr)
+    data = json.loads(stamp.read_text(encoding="utf-8"))
+except (json.JSONDecodeError, OSError) as exc:
+    raise SystemExit(f"ERROR: could not parse /opt/hermes/install-stamp.json: {exc}")
+got = str(data.get("displayVersion", ""))
+base = str(data.get("baseVersion", ""))
+if got != want_py or base != want_py:
+    print(f"ERROR: install stamp reports displayVersion={got!r} baseVersion={base!r}; "
+          f"this template targets {want_tag} ({want_py}).", file=sys.stderr)
     print("       Bump EXPECTED_HERMES_VERSION and reconcile every anchored patch before pruning.", file=sys.stderr)
     raise SystemExit(1)
-print(f"prune verify: Hermes pyproject version {got} (~ {want_tag}) OK")
+print(f"prune verify: Hermes install stamp {got} (~ {want_tag}) OK")
 PYBLOCK
 
 before=$(du -sm / 2>/dev/null | cut -f1)
@@ -124,13 +118,52 @@ rm_group "ui-tui TS source" \
 # `hermes --tui` also goes dark (opt-out semantics). Browsers (KEEP_BROWSER)
 # do not need node.
 if [ "$KEEP_TUI" = "0" ]; then
+    # v0.21.x keeps node/npm in the managed tool store; /usr/local/bin/{node,npm,npx}
+    # are symlinks into it, so remove both the links and the store trees.
     rm_group "node runtime (KEEP_TUI=0)" \
         /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx \
-        /usr/local/lib/node_modules
+        /usr/local/lib/node_modules \
+        /opt/hermes/tools/node-* /opt/hermes/tools/npm-*
     rm_group "TUI bundle (KEEP_TUI=0)"    /opt/hermes/ui-tui
 else
     echo "  KEPT: node + in-browser Chat tab TUI (KEEP_TUI=1)"
 fi
+
+# --- Managed tool store trims (v0.21.x) -------------------------------------
+# /opt/hermes/tools is Hermes' managed toolchain: managed Python, ffmpeg/ffprobe,
+# ripgrep, uv, and (depending on KEEP_TUI / KEEP_BROWSER) node/npm and Chromium.
+# Hermes resolves these through HERMES_RUNTIME_DIR, so the directory itself stays.
+# Only build-time or never-reached content is trimmed here:
+#   - ffplay: interactive player (needs a display); Hermes uses ffmpeg/ffprobe only
+#     (tools/transcription_audio.py, the TTS/audio paths). ~148 MB.
+#   - ffmpeg man/doc pages.
+#   - managed Python C headers and static (.a) archives: the image has no compiler,
+#     and the venv/PM never build native extensions at runtime (lazy installs are
+#     disabled by HERMES_DISABLE_LAZY_INSTALLS=1).
+rm_group "ffplay (interactive player)" /opt/hermes/tools/ffmpeg-*/bin/ffplay
+rm_group "ffmpeg man/doc"              /opt/hermes/tools/ffmpeg-*/man /opt/hermes/tools/ffmpeg-*/doc
+rm_group "managed python headers"      /opt/hermes/tools/python-*/include
+# Tk GUI stack (tkinter, _tkinter.so, Tcl/Tk libs, IDLE, turtledemo). Hermes never
+# imports tkinter; PIL.ImageTk and tqdm.tk import it lazily only if a caller asks.
+# The managed _tkinter.so also cannot resolve its Tcl/Tk libraries (no RUNPATH),
+# so the module is non-functional and the ldd sweep flags it. ~9 MB.
+rm_group "tkinter/Tcl/Tk stack (unused)" \
+    /opt/hermes/tools/python-*/lib/python3.*/tkinter \
+    /opt/hermes/tools/python-*/lib/python3.*/lib-dynload/_tkinter*.so \
+    /opt/hermes/tools/python-*/lib/libtcl9* \
+    /opt/hermes/tools/python-*/lib/itcl* /opt/hermes/tools/python-*/lib/thread3* \
+    /opt/hermes/tools/python-*/lib/tcl9* /opt/hermes/tools/python-*/lib/tk9.0 \
+    /opt/hermes/tools/python-*/lib/python3.*/idlelib \
+    /opt/hermes/tools/python-*/lib/python3.*/turtledemo
+find /opt/hermes/tools -path '*/python-*/*' -name '*.a' -type f -delete 2>/dev/null || true
+echo "  pruned: managed python static archives (*.a)"
+
+# Sanitizer runtimes are only loaded by binaries built with -fsanitize=...; none of
+# the runtime binaries are. ~24 MB. (libasan/libtsan/libhwasan/liblsan/libubsan.)
+rm_group "sanitizer runtimes (dev-only)" \
+    /usr/lib/*-linux-gnu/libasan.so* /usr/lib/*-linux-gnu/libtsan.so* \
+    /usr/lib/*-linux-gnu/libhwasan.so* /usr/lib/*-linux-gnu/liblsan.so* \
+    /usr/lib/*-linux-gnu/libubsan.so*
 
 # --- Out-of-scope messaging platforms (Telegram is the only target) --------
 # The user removed WhatsApp + iMessage/Photon from scope. This template must
@@ -161,7 +194,7 @@ fi
 #                                and the lazy import_module() would raise
 #                                ModuleNotFoundError out of _instantiate_*.
 #                                We DEFUSE that upstream line in-place below,
-#                                mirroring the exact v2026.9.14 text so nothing
+#                                mirroring the exact v0.21.6 text so nothing
 #                                else changes. Keeping whatsapp_common would
 #                                pull WhatsAppBehaviorMixin runtime deps; it is
 #                                only referenced by the two removed modules &
@@ -206,6 +239,10 @@ rm_group "C/C++ frontends" \
     /usr/bin/x86_64-linux-gnu-g++* /usr/bin/aarch64-linux-gnu-g++* \
     /usr/bin/x86_64-linux-gnu-cc /usr/bin/aarch64-linux-gnu-cc \
     /usr/bin/*-linux-gnu-lto-dump-*
+# Compiler backends (cc1, lto1, collect2, crt*.o, libgcc.a). The frontends above
+# are useless without these, and they are ~130 MB. The shared libgcc_s runtime
+# lives in /usr/lib/<multiarch> and is NOT touched; the ldd sweep below verifies it.
+rm_group "gcc backends" /usr/libexec/gcc /usr/lib/gcc
 rm_group "binutils" \
     /usr/bin/as /usr/bin/ld /usr/bin/ld.bfd /usr/bin/ld.gold \
     /usr/bin/ar /usr/bin/ranlib /usr/bin/nm /usr/bin/objcopy \
@@ -219,7 +256,13 @@ rm_group "pkg-config" \
 rm_group "cmake/ctest/cpack" \
     /usr/bin/cmake /usr/bin/ctest /usr/bin/cpack /usr/share/cmake-*
 
-multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+# dpkg-architecture (dpkg-dev) is NOT installed in the Hermes base image, so a plain
+# lookup returns "" and silently skips every multiarch-path prune (the whole GUI/GPU
+# stack: Mesa, LLVM, NSS, X11 client libs). Derive the multiarch directory from the
+# library layout first, and only fall back to dpkg-architecture when present.
+multiarch="$(ls -d /usr/lib/*-linux-gnu 2>/dev/null | head -n 1 | xargs -r basename)"
+[ -n "$multiarch" ] || multiarch="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+echo "  multiarch dir: ${multiarch:-<none>}"
 if [ -n "$multiarch" ]; then
     rm_group "static libs" \
         /usr/lib/python3.13/config-3.13-* \
@@ -270,7 +313,14 @@ rm_group "dev/CI leftovers" \
 if [ "$KEEP_BROWSER" = "1" ]; then
     echo "  KEPT: browser automation (KEEP_BROWSER=1)"
 else
-    rm_group "playwright chromium+ffmpeg" /opt/hermes/.playwright
+    # v0.21.x ships the pinned Chromium in the managed tool store
+    # (/opt/hermes/tools/chromium-<rev>, PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools).
+    # The legacy /opt/hermes/.playwright location is kept in the list for older
+    # layouts; unmatched globs are harmless with rm -f semantics.
+    rm_group "pinned Chromium (tool store)" /opt/hermes/tools/chromium-* /opt/hermes/.playwright
+    # The stage2 hook reads this file to export AGENT_BROWSER_EXECUTABLE_PATH.
+    # Remove it with the browser so boot does not warn about a missing binary.
+    rm_group "agent-browser Chromium pointer" /etc/hermes/agent-browser-executable-path
     rm_group "fonts"                      /usr/share/fonts
 
     # The GPU/Xvfb parts are below; this removes the remaining GUI/X11 client
@@ -327,11 +377,15 @@ fi
 # tree) would otherwise fail silently here and only surface later as a
 # surprise --browser-enabled path (and a size regression) on the $5 tier.
 # Fail fast, and say WHICH tree survived so a layout change is actionable.
-if [ "$KEEP_BROWSER" = "0" ] && [ -d /opt/hermes/.playwright ]; then
-    echo "ERROR: KEEP_BROWSER=0 but /opt/hermes/.playwright still exists — the browser tree" >&2
-    echo "       was not pruned (upstream layout changed?). Wire the new location into the" >&2
-    echo "       KEEP_BROWSER prune list above." >&2
-    exit 1
+if [ "$KEEP_BROWSER" = "0" ]; then
+    for leftover in /opt/hermes/.playwright /opt/hermes/tools/chromium-* /etc/hermes/agent-browser-executable-path; do
+        if [ -e "$leftover" ]; then
+            echo "ERROR: KEEP_BROWSER=0 but $leftover still exists — the browser tree" >&2
+            echo "       was not pruned (upstream layout changed?). Wire the new location into the" >&2
+            echo "       KEEP_BROWSER prune list above." >&2
+            exit 1
+        fi
+    done
 fi
 
 # --- Shared-library integrity sweep -----------------------------------------
@@ -342,9 +396,13 @@ missing=$( {
     ldd "$(command -v python3)" 2>/dev/null
     [ "$KEEP_TUI" = "1" ] && ldd /usr/local/bin/node 2>/dev/null
     ldd /opt/hermes/.venv/bin/python3 2>/dev/null
-    find /opt/hermes/.venv -type f -name '*.so' -print0 2>/dev/null \
+    # Native extensions of the venv AND of the managed tool store (its Python
+    # lib-dynload, plus any bundled tool libraries).
+    find /opt/hermes/.venv /opt/hermes/tools -type f -name '*.so*' -print0 2>/dev/null \
         | xargs -0 -r -n 200 ldd 2>/dev/null
-    ldd /usr/bin/rg /usr/bin/git /usr/bin/ffmpeg 2>/dev/null
+    # v0.21.x: rg and ffmpeg/ffprobe live in the managed tool store, not /usr/bin.
+    ldd /opt/hermes/tools/ripgrep-*/rg /opt/hermes/tools/ffmpeg-*/bin/ffmpeg \
+        /opt/hermes/tools/ffmpeg-*/bin/ffprobe /usr/bin/git 2>/dev/null
 } | grep -i "not found" || true)
 if [ -n "$missing" ]; then
     echo "ERROR: prune removed a shared library still required at runtime:" >&2
@@ -369,7 +427,7 @@ find /opt/hermes -xdev \
 find / -xdev -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
 # --- HOME alignment for this template's data layout ------------------------
-# This template sets HERMES_HOME=/data/.hermes, but upstream v2026.9.14
+# This template sets HERMES_HOME=/data/.hermes, but upstream v0.21.6
 # hard-codes HOME=/opt/data in the dashboard s6 service and in the main
 # program wrapper. Left unpatched, HOME-anchored state (git config, .netrc,
 # provider SDK config, XDG state) would land in the non-persistent /opt/data
@@ -435,21 +493,22 @@ sed -i 's|^    return any(part\.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part
 echo "  hardened: dashboard file browser blocks /proc (sensitive-path guard)"
 
 # --- Security repair / gate: known-vulnerable venv packages ------------------
-# The pinned release's frozen dependency set contains three packages the
-# dashboard security audit flagged, with these upgrades:
+# The v0.21.6 frozen dependency set still ships two packages the dashboard
+# security audit flagged (httpx2 and httpcore2 at 2.7.0). A third one, anyio,
+# was already upgraded upstream to 4.14.2 (the fixed release), so it is no
+# longer swapped here; the gate below only checks that it is still >= 4.14.2.
 #
-#   anyio     4.12.1  ->  4.14.2   GHSA-82r6-8w77-94w6 (CRITICAL)
-#                                + GHSA-5p39-cfhj-2xmp (MODERATE)
+#   anyio     4.14.2  ->  (already fixed upstream; gate only: must be >= 4.14.2)
+#                                GHSA-82r6-8w77-94w6 (CRITICAL), GHSA-5p39-cfhj-2xmp (MODERATE)
 #   httpx2    2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH, fixed 2.10.0)
 #                                + GHSA-8xx6-hgc6-gc2m (HIGH, fixed 2.12.0)
 #                                + remaining MODERATE/UNKNOWN findings (fixed <= 2.12.0)
 #   httpcore2 2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH) + PYSEC-2026-3844 (UNKNOWN)
 #
-# httpx2==2.12.0 requires httpcore2==2.12.0 exactly and anyio>=4.10 (confirmed
-# via PyPI metadata). anyio 4.14.2 requires no new transitive (idna>=2.8, already
-# locked at 3.18; typing-extensions only for py<3.13). All three are pure-Python
-# wheels, so we swap them in-place deterministically: download -> SHA-256 verify
-# -> unzip the wheel's top-level package dir + dist-info over the venv.
+# httpx2==2.12.0 requires httpcore2==2.12.0 exactly and anyio>=4.10 (satisfied by
+# the upstream anyio 4.14.2). Both swapped packages are pure-Python wheels, so we
+# swap them in-place deterministically: download -> SHA-256 verify -> unzip the
+# wheel's top-level package dir + dist-info over the venv.
 #
 # The block is a GATE first: it aborts the build unless the venv still matches
 # the exact pinned vulnerable set being targeted (so a future Hermes bump, with
@@ -471,12 +530,8 @@ SP = os.path.join(_lib, _pydirs[0], "site-packages")
 WHEEL_DIR = "/run/venv-wheels"
 
 # dist_name -> (module_dir, fixed_version, sha256, wheel url)
+# anyio is intentionally absent: v0.21.6 already ships anyio 4.14.2 (see gate).
 PINS = {
-    "anyio": (
-        "anyio", "4.14.2",
-        "9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494",
-        "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl",
-    ),
     "httpx2": (
         "httpx2", "2.12.0",
         "cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36",
@@ -495,7 +550,7 @@ installed = {
 }
 
 # GATE: only proceed if we recognise the exact vulnerable set being patched.
-expected_vuln = {"anyio": "4.12.1", "httpx2": "2.7.0", "httpcore2": "2.7.0"}
+expected_vuln = {"httpx2": "2.7.0", "httpcore2": "2.7.0"}
 for name, (mod, want, want_sha, url) in PINS.items():
     cur = installed.get(name)
     if cur != expected_vuln[name]:
@@ -503,6 +558,18 @@ for name, (mod, want, want_sha, url) in PINS.items():
             f"venv-verify: '{name}' is {cur!r}, expected {expected_vuln[name]!r} — "
             f"this blocker targets the pinned Hermes release; reconcile it before pruning."
         )
+
+# anyio must already be the fixed release shipped upstream. If a future Hermes
+# downgrades it, fail closed rather than silently shipping a vulnerable anyio.
+def _ver(s):
+    return tuple(int(p) for p in s.split(".")[:3] if p.isdigit())
+_anyio = installed.get("anyio")
+if _anyio is None or _ver(_anyio) < (4, 14, 2):
+    raise SystemExit(
+        f"venv-verify: 'anyio' is {_anyio!r}, need >= 4.14.2 (the fixed release). "
+        f"Reconcile the security gate before pruning."
+    )
+print(f"venv-verify: anyio {_anyio} already fixed upstream")
 
 def _fetch(url, sha, dest):
     if os.path.exists(dest) and hashlib.sha256(open(dest, "rb").read()).hexdigest() == sha:
@@ -538,7 +605,7 @@ for name, (mod, want, want_sha, url) in PINS.items():
 import importlib
 for name, (mod, want, _sha, _url) in PINS.items():
     importlib.import_module(mod)
-print("venv-fix: all three swapped and importable")
+print("venv-fix: swapped packages importable")
 PYBLOCK
 
 /opt/hermes/.venv/bin/python3 /run/venv-swap.py || {
@@ -547,7 +614,7 @@ PYBLOCK
     exit 1
 }
 rm -rf /run/venv-wheels /run/venv-swap.py
-echo "  secured: venv anyio/httpx2/httpcore2 upgraded to fixed releases"
+echo "  secured: venv httpx2/httpcore2 upgraded to fixed releases (anyio already fixed upstream)"
 
 
 after=$(du -sm / 2>/dev/null | cut -f1)
@@ -662,6 +729,9 @@ cleanup_dashboard
 trap - EXIT
 
 rm -rf /tmp/prune-verify-home
+
+# Verification imported Hermes and may have written bytecode; drop it again.
+find /opt/hermes /opt/hermes/tools -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
 # Guard the guard: importing/verifying Hermes must not leave persistent
 # state in the image's data-volume mountpoint. This template mounts its

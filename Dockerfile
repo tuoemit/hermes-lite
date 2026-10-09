@@ -2,13 +2,16 @@
 # ============================================================================
 # Railway wrapper around the official Hermes Agent image.
 #
-# The upstream image is pinned to a released version so the pruning rules and
-# runtime checks are reproducible. The first stage removes build-only and
-# unused runtime content; the second stage copies the remaining rootfs into a
-# fresh image so the removed bytes do not remain in parent layers.
+# The upstream image is pinned to a released version (v0.21.6) by tag AND
+# digest so the pruning rules and runtime checks are reproducible. The first
+# stage removes build-only and unused runtime content; the second stage copies
+# the remaining rootfs into a fresh image so the removed bytes do not remain in
+# parent layers.
+#
+# Pinned: nousresearch/hermes-agent:v0.21.6 (multi-arch index digest below).
 # ============================================================================
 
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v2026.9.14@sha256:99641e57ec762c59e54cb44aa6746b7fc68c18b3c5ddb088af54234c613d9294
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v0.21.6@sha256:55e192fba0cd4fde61142abbff5adeacff40efdb482ccd0ff877924bd274f909
 
 # ---------------------------------------------------------------------------
 # Stage 1 — prune the official Hermes image.
@@ -17,11 +20,13 @@ FROM ${HERMES_IMAGE} AS pruned
 USER root
 
 # Fail the build if the base regresses to a SQLite version older than the
-# release required to avoid the SQLite WAL-reset corruption bug.
+# release required to avoid the SQLite WAL-reset corruption bug. Hermes runs on
+# its managed Python (/usr/local/bin/python3 -> /opt/hermes/tools/python-*), which
+# bundles its own SQLite, so this checks the interpreter Hermes actually uses.
 RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLite", sqlite3.sqlite_version); sys.exit("ERROR: SQLite WAL-reset fix missing; need >= 3.51.3") if v < (3,51,3) else None'
 
-# Browser automation OFF by default for Railway $5 free tier (Telegram+Dashboard).
-# Set to 1 only if you need Playwright/Chromium browser tools.
+# Browser automation OFF by default for Railway free-tier-class hosts.
+# Set to 1 only if you need the Chromium-backed browser tools (needs >= 2 GB RAM).
 ARG KEEP_BROWSER=0
 
 # In-browser Chat tab: OFF by default. This template targets a Telegram-only
@@ -43,26 +48,35 @@ FROM scratch AS runtime
 COPY --from=pruned / /
 
 # --- Hermes runtime environment -------------------------------------------
-# HERMES_TUI_DIR stays set unconditionally: with KEEP_TUI=1 (default) it points
-# at the prebuilt bundle; with KEEP_TUI=0 the bundle is pruned and the Chat tab
+# Mirrors the upstream v0.21.6 image environment where it matters, with the
+# template's /data layout on top.
+#
+# HERMES_RUNTIME_DIR (/opt/hermes/tools) is the managed tool store (managed
+# Python, ffmpeg, ripgrep, uv and, with KEEP_TUI=1, node/npm; and with
+# KEEP_BROWSER=1 the pinned Chromium). Hermes resolves those tools through it,
+# so it must stay set even though the tree itself is pruned.
+#
+# HERMES_WEB_DIST is load-bearing after pruning the web source tree: it makes
+# the dashboard serve the prebuilt SPA instead of attempting a boot-time
+# frontend build.
+#
+# With KEEP_TUI=0 the Node runtime and TUI bundle are pruned and the Chat tab
 # launcher fails CLEANLY (chat_ws catches the SystemExit and returns a 4xx-style
 # WS close), which is the documented behavior for opting the tab out.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/.playwright \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools \
+    HERMES_RUNTIME_DIR=/opt/hermes/tools \
+    HERMES_PYTHON=/opt/hermes/.venv/bin/python \
     npm_config_install_links=false \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
+    XDG_RUNTIME_DIR=/tmp/hermes-runtime \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
     HERMES_DASHBOARD_FILES_ROOT=/data/.hermes \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_LAZY_INSTALL_TARGET=/data/lazy-packages \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# HERMES_WEB_DIST is load-bearing after pruning the web source tree: it makes
-# the dashboard serve the prebuilt SPA instead of attempting a boot-time
-# frontend build.
 
 # --- Railway-specific environment ----------------------------------------
 ENV HERMES_DASHBOARD=1 \

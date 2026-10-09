@@ -199,7 +199,10 @@ else
     auth_label="oauth"
 fi
 browser_label="off"
-[ -d /opt/hermes/.playwright ] && browser_label="on"
+# v0.21.x: the pinned Chromium lives in the managed tool store (not /opt/hermes/.playwright).
+for _chromium in /opt/hermes/tools/chromium-* /opt/hermes/.playwright; do
+    [ -e "$_chromium" ] && browser_label="on"
+done
 echo "[railway-entrypoint] PORT=$PORT HERMES_DASHBOARD_PORT=$HERMES_DASHBOARD_PORT HERMES_HOME=${HERMES_HOME:-} auth_provider=$auth_label browser=$browser_label"
 
 # Delegate to the upstream dispatcher rather than /init directly. The
