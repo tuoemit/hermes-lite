@@ -41,6 +41,8 @@ notes ship with v0.22.0. Highlights that matter for this template:
 
 **Dockerfile**
 - Pin moved to `v0.21.6` (tag + multi-arch index digest).
+- `KEEP_TUI` now defaults to `1`: Node and the TUI bundle are kept, so the in-browser Chat tab and `hermes --tui` work and the
+  install matches its runtime manifest. Set `KEEP_TUI=0` to drop them for a smaller image.
 - Environment aligned with upstream: `PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools`, added `HERMES_RUNTIME_DIR`,
   `HERMES_PYTHON`, `XDG_RUNTIME_DIR`. Removed the dead `HERMES_LAZY_INSTALL_TARGET`.
 - *Dashboard file browser unlocked.* `HERMES_DASHBOARD_FILES_ROOT=/data/.hermes` is commented out, not deleted. Setting it
@@ -59,15 +61,21 @@ notes ship with v0.22.0. Highlights that matter for this template:
 - *Browser* (`KEEP_BROWSER=0`) removes `/opt/hermes/tools/chromium-*` and the
   `/etc/hermes/agent-browser-executable-path` pointer, so boot does not warn about a missing binary. The fail-fast
   check covers the new location.
-- *Node / TUI* (`KEEP_TUI=0`) removes `/opt/hermes/tools/node-*` and `npm-*` as well as the
+- *Node / TUI* (`KEEP_TUI=0`, now opt-in) removes `/opt/hermes/tools/node-*` and `npm-*` as well as the
   `/usr/local/bin` symlinks into them.
 - *New trims* in the managed tool store: `ffplay` (about 148 MB; Hermes uses only ffmpeg/ffprobe), ffmpeg
   man/doc pages, managed-Python C headers and static `.a` archives, the unused Tk stack (`tkinter`, Tcl/Tk libraries,
   IDLE, turtledemo), and sanitizer runtimes (libasan/libtsan/libhwasan/liblsan/libubsan).
 - *Library-integrity sweep* now covers the managed tool store: `rg`, `ffmpeg`, `ffprobe`, `git`, and every `.so` under
   the venv and the managed Python.
-- *Venv security gate*: `anyio` is gate-only (must be `>= 4.14.2`). Only `httpx2` and `httpcore2` are swapped. Both
-  wheels were re-verified against their pinned SHA-256 hashes.
+- *Venv security gate*: `anyio` is gate-only (must be `>= 4.14.2`). Seven packages are swapped for fixed releases, each
+  pinned by SHA-256 and checked after the swap: `httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0, `PyJWT` 2.13.0→2.15.1,
+  `tornado` 6.5.8→6.5.10, `urllib3` 2.7.0→2.8.0, `multidict` 6.7.1→6.9.1, `oauthlib` 3.3.1→4.0.0. Tornado and multidict
+  have compiled extensions, so they are pinned per architecture (x86_64 and aarch64). The gate fails the build unless
+  each package is at its exact expected vulnerable version before the swap.
+- *PyJWT and oauthlib are above upstream's pins.* `pyproject.toml` pins `PyJWT==2.13.0`, so the swapped 2.15.1 disagrees
+  with Hermes' own metadata. Nothing at startup or in the security audit reads that pin. Verified with a dependency
+  check: no other conflicts.
 - *Dashboard/gateway child launches fixed.* Upstream v0.21.6 starts every child process (dashboard Doctor, Security
   audit, Prompt size, Backup, gateway lifecycle) on the managed store Python whenever the store records one, which
   the image always does. A Docker image records no committed dependency environment, so the child was refused with
@@ -114,12 +122,20 @@ Done in this sandbox (no Docker daemon is available, so the Dockerfile itself wa
 - Managed Python SQLite 3.53.1 (passes the 3.51.3 gate); `hermes --version` reports `0.21.6` and
   `Install method: docker`.
 
-**Known, not changed**
-- The default build (`KEEP_TUI=0`) removes Node/npm, so upstream's startup check prints
-  `install out of sync (node: not installed or outdated; npm: ...)` on each CLI command and on each gateway boot.
-  The line is accurate for this build. Use `KEEP_TUI=1` to keep Node and silence it.
-- `security audit` on the image reports `PyJWT 2.13.0` (CRITICAL, GHSA-ffc3-869f-jxw9, fixed in 2.14.0) in the venv.
-  The template does not pin PyJWT yet.
+**Default build with Node kept (`KEEP_TUI=1`, now the default)**
+- `prune.sh` run with `KEEP_BROWSER=0 KEEP_TUI=1` (the template default): exit 0. Version gate, all anchored patches,
+  venv swap, module imports, TUI bundle probe, and dashboard health all pass. Root filesystem: 3,184 MB → 1,742 MB.
+- `hermes --version` on that tree no longer prints `install out of sync`.
+- `hermes security audit` on that tree: `No known vulnerabilities found across 145 component(s).` (exit 0). Before
+  this change it reported 42 findings in the venv, including PyJWT 2.13.0 (CRITICAL) and tornado, urllib3, multidict,
+  and oauthlib.
+- Functional smoke test of the swapped libraries (x86_64): PyJWT HS256 sign/verify and wrong-key rejection,
+  oauthlib client, urllib3 pool and URL parsing, multidict C extension, tornado HTTP round trip. All pass.
+
+**Still unverified (sandbox limits)**
+- The aarch64 wheels for tornado and multidict are SHA-256 pinned to PyPI, but the sandbox is x86_64 only, so they
+  were not executed.
+- Upstream's own test suite was not run against PyJWT 2.15.1 or oauthlib 4.0.0.
 
 **Not verified here** (needs a real environment): a `docker build`, the Railway deploy, s6 supervision (the
 gateway and dashboard as supervised services, which need root), and a live Telegram round trip.

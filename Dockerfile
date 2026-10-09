@@ -29,14 +29,14 @@ RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLit
 # Set to 1 only if you need the Chromium-backed browser tools (needs >= 2 GB RAM).
 ARG KEEP_BROWSER=0
 
-# In-browser Chat tab: OFF by default. This template targets a Telegram-only
-# deployment, so Node + the prebuilt TUI bundle (the tab's entire runtime) are
-# removed by default. Set to 1 only if you use the dashboard's embedded chat
-# (or `hermes --tui`) and want that runtime kept. With 0 the tab fails closed
-# with a clean "Chat unavailable" instead of crashing the dashboard, and
-# `hermes --tui` goes dark (opt-in trade). Browsers (KEEP_BROWSER) have no
-# node dependency either way.
-ARG KEEP_TUI=0
+# In-browser Chat tab: ON. Node + the prebuilt TUI bundle are kept, so the
+# dashboard's embedded chat and `hermes --tui` work. Keeping Node also keeps the
+# install consistent with the runtime manifest, so startup and the dashboard
+# security audit no longer report "install out of sync (node/npm)". Set to 0 to
+# drop Node and the TUI (smaller image; the Chat tab then fails closed and the
+# out-of-sync warning returns). Browsers (KEEP_BROWSER) have no node dependency
+# either way.
+ARG KEEP_TUI=1
 
 COPY --chmod=0755 prune.sh /prune.sh
 RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
@@ -60,8 +60,8 @@ COPY --from=pruned / /
 # the dashboard serve the prebuilt SPA instead of attempting a boot-time
 # frontend build.
 #
-# With KEEP_TUI=0 the Node runtime and TUI bundle are pruned and the Chat tab
-# launcher fails CLEANLY (chat_ws catches the SystemExit and returns a 4xx-style
+# With KEEP_TUI=1 (this template's default) the Node runtime and TUI bundle are
+# kept. With KEEP_TUI=0 they are pruned and the Chat tab launcher fails CLEANLY (chat_ws catches the SystemExit and returns a 4xx-style
 # WS close), which is the documented behavior for opting the tab out.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

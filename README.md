@@ -122,15 +122,16 @@ gateway (≈200–400 MB under load) + dashboard (≈100–200 MB) already fill 
 adds ≈150–300 MB per page and the free-tier disk quota cannot hold the browser stack. Enable only on a
 ≥2 GB plan by building with `KEEP_BROWSER=1`.
 
-## In-browser Chat tab — off by default
+## In-browser Chat tab — on by default
 
 The dashboard's embedded Chat tab (`/chat`, `/api/pty`) — which also powers `hermes --tui` from a shell —
-runs on the Node runtime and the prebuilt TUI bundle. Because this template targets a **Telegram-only**
-deployment, Node and the TUI bundle are **removed by default** (`KEEP_TUI=0`). The Chat tab then fails
-*closed* with a clear "Chat unavailable" message instead of crashing, and `hermes --tui` goes dark.
+runs on the Node runtime and the prebuilt TUI bundle. This template **keeps Node and the TUI bundle**
+(`KEEP_TUI=1`), so the Chat tab and `hermes --tui` work, and the install matches its runtime manifest (no
+"install out of sync (node/npm)" warning at startup or in the security audit).
 
-If you want the in-browser chat, build with `KEEP_TUI=1` to keep Node (`node`/`npm`/`npx`) and the TUI
-bundle. Browser automation (`KEEP_BROWSER`) does **not** require Node, so the two flags are independent.
+To drop them for a smaller image, build with `KEEP_TUI=0`. The Chat tab then fails *closed* with a clear
+"Chat unavailable" message, `hermes --tui` goes dark, and the out-of-sync warning returns. Browser automation
+(`KEEP_BROWSER`) does **not** require Node, so the two flags are independent.
 
 ---
 
@@ -161,10 +162,15 @@ GET /api/health
   The file browser and spot editor deny `/proc`, `/run`, and any `.dash` folder (sensitive-path guard). So dashboard-UI
   access cannot read `/proc/<pid>/environ`, the Railway secrets in `/run/s6/container_environment`, or the dashboard
   session-signing secret in `/data/.hermes/.dash/`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
-- The build upgrades the frozen dependency set's still-vulnerable HTTP-stack packages to their fixed
-  releases (`httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0) with SHA-256-verified wheels. `anyio` is
-  already at the fixed 4.14.2 upstream in v0.21.6, so it is only gate-checked (the build fails if it
-  ever drops below 4.14.2). The build fails closed if the pinned image drifts from the set it targets.
+- The build upgrades the frozen dependency set's vulnerable packages to fixed releases, each pinned by
+  SHA-256 and checked after the swap: `httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0, `PyJWT` 2.13.0→2.15.1,
+  `tornado` 6.5.8→6.5.10, `urllib3` 2.7.0→2.8.0, `multidict` 6.7.1→6.9.1, `oauthlib` 3.3.1→4.0.0. Tornado and
+  multidict have compiled extensions, so they are pinned per architecture (x86_64, aarch64). `anyio` is already
+  at the fixed 4.14.2 upstream in v0.21.6, so it is only gate-checked. The build fails closed if the pinned
+  image drifts from the set it targets.
+- The swapped `PyJWT` (2.15.1) and `oauthlib` (4.0.0) are newer than upstream's pins (`PyJWT==2.13.0` in
+  `pyproject.toml`). Upstream's package metadata therefore still declares 2.13.0 for PyJWT. This does not affect
+  startup or the security audit, which report clean.
 - Keep all credentials in Railway **secret** variables. The boot hook seeds `$HERMES_HOME/.env` with
   mode `0600`.
 - The image base is pinned by digest (tag + `@sha256:…`) for reproducible builds.
@@ -244,7 +250,8 @@ store Python). This template fixes it at build time. If you still see it, redepl
 image is rebuilt. Do not run `hermes pm repair`: it rebuilds the whole dependency environment.
 
 **`install out of sync (node: …; npm: …)` warning**
-Expected on the default build: Node and npm are removed (`KEEP_TUI=0`). Set `KEEP_TUI=1` to keep them.
+Not expected on the default build, which keeps Node and npm (`KEEP_TUI=1`). If you built with `KEEP_TUI=0`, the
+warning is expected: Node and npm were removed. Rebuild with `KEEP_TUI=1` to clear it.
 
 **Free-tier reality check**
 Budget honestly: 0.5 GB RAM is shared by gateway + dashboard + the bot's work. Reduce concurrent load

@@ -567,32 +567,39 @@ grep -qF 'path.parts[1] in ("proc", "run")' "$_fsfiles" && grep -qF '"pairing", 
 echo "  hardened: file browser and spot editor deny /proc, /run and .dash (sensitive-path guard)"
 
 # --- Security repair / gate: known-vulnerable venv packages ------------------
-# The v0.21.6 frozen dependency set still ships two packages the dashboard
-# security audit flagged (httpx2 and httpcore2 at 2.7.0). A third one, anyio,
-# was already upgraded upstream to 4.14.2 (the fixed release), so it is no
-# longer swapped here; the gate below only checks that it is still >= 4.14.2.
+# The v0.21.6 frozen dependency set ships packages the dashboard security audit
+# flags. Each one is swapped for a pinned release, downloaded from PyPI and
+# verified against its SHA-256 before use. anyio is already fixed upstream
+# (4.14.2) and is gate-only.
 #
-#   anyio     4.14.2  ->  (already fixed upstream; gate only: must be >= 4.14.2)
-#                                GHSA-82r6-8w77-94w6 (CRITICAL), GHSA-5p39-cfhj-2xmp (MODERATE)
-#   httpx2    2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH, fixed 2.10.0)
-#                                + GHSA-8xx6-hgc6-gc2m (HIGH, fixed 2.12.0)
-#                                + remaining MODERATE/UNKNOWN findings (fixed <= 2.12.0)
-#   httpcore2 2.7.0   ->  2.12.0   GHSA-7mj9-2mp8-4m2p (HIGH) + PYSEC-2026-3844 (UNKNOWN)
+#   package     from      to        advisories addressed
+#   httpx2      2.7.0     2.12.0    GHSA-7mj9-2mp8-4m2p (HIGH), GHSA-8xx6-hgc6-gc2m (HIGH), MODERATE/UNKNOWN
+#   httpcore2   2.7.0     2.12.0    GHSA-7mj9-2mp8-4m2p (HIGH), PYSEC-2026-3844 (UNKNOWN)
+#   PyJWT       2.13.0    2.15.1    GHSA-ffc3-869f-jxw9 (CRITICAL), GHSA-9j54-fg26-wv3r, GHSA-9v7f-9g4p-ffgj,
+#                                   GHSA-p4g4-x82p-q773, GHSA-r6x4-923q-g947, GHSA-w2cx-738m-mc7w (HIGH), MODERATE/UNKNOWN
+#   tornado     6.5.8     6.5.10    GHSA-c2m8-h5v5-343r, GHSA-chx6-46f5-w4vp (HIGH), GHSA-3hv7-mjh2-fv65 (MODERATE)
+#   urllib3     2.7.0     2.8.0     GHSA-8988-9cw3-xx77, GHSA-vxq7-64xx-v4gw (HIGH), GHSA-gh4c-6fx4-qh6g (MODERATE),
+#                                   PYSEC-2026-4175/4176/4177 (UNKNOWN)
+#   multidict   6.7.1     6.9.1     GHSA-54p9-h82j-f925 (MODERATE)
+#   oauthlib    3.3.1     4.0.0     GHSA-hj66-6f7g-4r5v, GHSA-xpv3-w29h-x7cv (MODERATE), PYSEC-2026-4113/4114 (UNKNOWN)
 #
-# httpx2==2.12.0 requires httpcore2==2.12.0 exactly and anyio>=4.10 (satisfied by
-# the upstream anyio 4.14.2). Both swapped packages are pure-Python wheels, so we
-# swap them in-place deterministically: download -> SHA-256 verify -> unzip the
-# wheel's top-level package dir + dist-info over the venv.
+# NOTE: PyJWT 2.15.1 and oauthlib 4.0.0 are newer than the pins in upstream's
+# pyproject.toml (PyJWT==2.13.0). The build verifies the swapped set imports and
+# that the dashboard still starts; it does not rely on upstream's lock.
 #
-# The block is a GATE first: it aborts the build unless the venv still matches
-# the exact pinned vulnerable set being targeted (so a future Hermes bump, with
-# the advisories already fixed upstream, cannot apply a now-wrong swap). The fix
-# runs in stage 1, so the corrected venv is captured by the stage-2 flatten COPY.
+# Pure-Python wheels use one pinned file. Tornado and multidict ship compiled
+# extensions, so each has one pinned wheel per architecture (x86_64, aarch64).
+# The gate aborts the build unless the venv still matches the exact vulnerable
+# set this block targets, so a future Hermes bump cannot apply a stale swap.
+# The fix runs in stage 1, so the corrected venv is captured by the stage-2
+# flatten COPY.
 mkdir -p /run/venv-wheels
 cat > /run/venv-swap.py <<'PYBLOCK'
 import hashlib
+import importlib
 import importlib.metadata
 import os
+import platform
 import shutil
 import urllib.request
 import zipfile
@@ -603,19 +610,49 @@ _pydirs = [p for p in os.listdir(_lib) if p.startswith("python")]
 SP = os.path.join(_lib, _pydirs[0], "site-packages")
 WHEEL_DIR = "/run/venv-wheels"
 
-# dist_name -> (module_dir, fixed_version, sha256, wheel url)
-# anyio is intentionally absent: v0.21.6 already ships anyio 4.14.2 (see gate).
+# name -> (import module, vulnerable version to gate on, fixed version,
+#          {"any" | arch: (sha256, url)})   anyio is intentionally absent.
 PINS = {
-    "httpx2": (
-        "httpx2", "2.12.0",
+    "httpx2": ("httpx2", "2.7.0", "2.12.0", {"any": (
         "cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36",
         "https://files.pythonhosted.org/packages/c8/95/411ba65569158e862368917aaf56597f3e5fa3b91b0502919638465a08f3/httpx2-2.12.0-py3-none-any.whl",
-    ),
-    "httpcore2": (
-        "httpcore2", "2.12.0",
+    )}),
+    "httpcore2": ("httpcore2", "2.7.0", "2.12.0", {"any": (
         "7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb",
         "https://files.pythonhosted.org/packages/d2/74/d370e55600d9bcfa0d9794b0166126d49291a3d2b20c268fc98c453a4948/httpcore2-2.12.0-py3-none-any.whl",
-    ),
+    )}),
+    "pyjwt": ("jwt", "2.13.0", "2.15.1", {"any": (
+        "42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193",
+        "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl",
+    )}),
+    "tornado": ("tornado", "6.5.8", "6.5.10", {
+        "x86_64": (
+            "bdf942448169e5336451d0494d7e3d81cfa726d5aa312affdc4682dd62a62f6d",
+            "https://files.pythonhosted.org/packages/60/33/df6d7d04854a58619f8349a51e3edb138324130a7562b0bb21f115bb940f/tornado-6.5.10-cp39-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
+        ),
+        "aarch64": (
+            "69acca6501eed74582b76dbbceee2a91613f54728e3e418346000d7103101676",
+            "https://files.pythonhosted.org/packages/29/17/cc35dff68272d685cffd8600ffafbd8067e7d05e7348d9f80caddffbbd5f/tornado-6.5.10-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+        ),
+    }),
+    "urllib3": ("urllib3", "2.7.0", "2.8.0", {"any": (
+        "0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3",
+        "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl",
+    )}),
+    "multidict": ("multidict", "6.7.1", "6.9.1", {
+        "x86_64": (
+            "b69651732c64afb691e50cdc3387cae305e0eeff8804fe3e3ce203876494932a",
+            "https://files.pythonhosted.org/packages/f8/e5/8d54118bc228e64e1087f1729647b93bbea225eda4a3f914663a6f410bca/multidict-6.9.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        ),
+        "aarch64": (
+            "989261c5f1735a165f2e4e87cf6d5f17ab734fa18f9ad0383d5adfcdaefce701",
+            "https://files.pythonhosted.org/packages/a0/97/555aab000e03ecba85c0a1837fd5674d8bf10949490df7800da3a40660ce/multidict-6.9.1-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+        ),
+    }),
+    "oauthlib": ("oauthlib", "3.3.1", "4.0.0", {"any": (
+        "624c28c13a0a59cabf9747dfa52af63be3e512a7f2714df16e91b5b3a145e6cd",
+        "https://files.pythonhosted.org/packages/d9/f4/78229a1066068ca14fc60fb26cf7381cabe4382261392b90e5f9552722d4/oauthlib-4.0.0-py3-none-any.whl",
+    )}),
 }
 
 installed = {
@@ -623,13 +660,13 @@ installed = {
     for d in importlib.metadata.distributions(path=[SP])
 }
 
-# GATE: only proceed if we recognise the exact vulnerable set being patched.
-expected_vuln = {"httpx2": "2.7.0", "httpcore2": "2.7.0"}
-for name, (mod, want, want_sha, url) in PINS.items():
+# GATE: only proceed if every package is at the exact vulnerable version this
+# block targets (or already at the fixed version, for a re-run).
+for name, (mod, vuln, want, _variants) in PINS.items():
     cur = installed.get(name)
-    if cur != expected_vuln[name]:
+    if cur not in (vuln, want):
         raise SystemExit(
-            f"venv-verify: '{name}' is {cur!r}, expected {expected_vuln[name]!r} — "
+            f"venv-verify: '{name}' is {cur!r}, expected {vuln!r} — "
             f"this blocker targets the pinned Hermes release; reconcile it before pruning."
         )
 
@@ -645,6 +682,14 @@ if _anyio is None or _ver(_anyio) < (4, 14, 2):
     )
 print(f"venv-verify: anyio {_anyio} already fixed upstream")
 
+def _pick(name, variants):
+    if "any" in variants:
+        return variants["any"]
+    arch = platform.machine()
+    if arch not in variants:
+        raise SystemExit(f"venv-fix: no pinned {name} wheel for architecture {arch!r} (aborting)")
+    return variants[arch]
+
 def _fetch(url, sha, dest):
     if os.path.exists(dest) and hashlib.sha256(open(dest, "rb").read()).hexdigest() == sha:
         return
@@ -656,9 +701,13 @@ def _fetch(url, sha, dest):
     with open(dest, "wb") as f:
         f.write(data)
 
-for name, (mod, want, want_sha, url) in PINS.items():
-    whl = os.path.join(WHEEL_DIR, f"{name}-{want}.whl")
-    _fetch(url, want_sha, whl)
+for name, (mod, vuln, want, variants) in PINS.items():
+    if installed.get(name) == want:
+        print(f"venv-fix: {name} already {want}")
+        continue
+    sha, url = _pick(name, variants)
+    whl = os.path.join(WHEEL_DIR, url.rsplit("/", 1)[1])
+    _fetch(url, sha, whl)
     stage = whl + ".u"
     shutil.rmtree(stage, ignore_errors=True)
     os.makedirs(stage)
@@ -666,20 +715,22 @@ for name, (mod, want, want_sha, url) in PINS.items():
         z.extractall(stage)
     shutil.rmtree(os.path.join(SP, mod), ignore_errors=True)
     shutil.copytree(os.path.join(stage, mod), os.path.join(SP, mod))
+    # Drop every old dist-info for this package (case-insensitive: PyJWT vs pyjwt).
     for stale in os.listdir(SP):
-        if stale.startswith(name + "-") and stale.endswith(".dist-info"):
+        if stale.lower().startswith(name + "-") and stale.endswith(".dist-info"):
             shutil.rmtree(os.path.join(SP, stale), ignore_errors=True)
-    shutil.copytree(
-        os.path.join(stage, f"{name}-{want}.dist-info"),
-        os.path.join(SP, f"{name}-{want}.dist-info"),
-    )
-    print(f"venv-fix: {name} {expected_vuln[name]} -> {want}")
+    new_info = [d for d in os.listdir(stage) if d.endswith(".dist-info")]
+    assert len(new_info) == 1, new_info
+    shutil.copytree(os.path.join(stage, new_info[0]), os.path.join(SP, new_info[0]))
+    print(f"venv-fix: {name} {vuln} -> {want}")
 
-# Post-swap smoke: imports must resolve against the fixed copies.
-import importlib
-for name, (mod, want, _sha, _url) in PINS.items():
+# Post-swap check: every package imports and reports the fixed version.
+for name, (mod, vuln, want, _variants) in PINS.items():
     importlib.import_module(mod)
-print("venv-fix: swapped packages importable")
+    got = importlib.metadata.version(name)
+    if got != want:
+        raise SystemExit(f"venv-fix: {name} reports {got!r} after swap, expected {want!r} (aborting)")
+print("venv-fix: swapped packages importable at pinned versions")
 PYBLOCK
 
 /opt/hermes/.venv/bin/python3 /run/venv-swap.py || {
@@ -688,7 +739,7 @@ PYBLOCK
     exit 1
 }
 rm -rf /run/venv-wheels /run/venv-swap.py
-echo "  secured: venv httpx2/httpcore2 upgraded to fixed releases (anyio already fixed upstream)"
+echo "  secured: venv packages upgraded to fixed releases (httpx2, httpcore2, PyJWT, tornado, urllib3, multidict, oauthlib; anyio already fixed upstream)"
 
 
 after=$(du -sm / 2>/dev/null | cut -f1)
