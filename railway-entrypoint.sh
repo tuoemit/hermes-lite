@@ -21,6 +21,9 @@ fi
 # Railway's health probe and Hermes to disagree about where the service lives.
 export HERMES_DASHBOARD_PORT="$PORT"
 : "${HERMES_HOME:=/data/.hermes}"
+# HOME of the runtime user. The official Hermes home is ~/.hermes, so with this
+# HOME the Hermes home is /data/.hermes. Services get HOME from prune.sh.
+runtime_home=/data
 
 # ---- Short credential aliases -----------------------------------------------
 # Friendly names for the dashboard login. The canonical (underscored) Hermes
@@ -142,8 +145,8 @@ esac
 # (no-volume) restart and the warning would return. Everything here is
 # best-effort: it MUST NOT be able to fail the Pod boot.
 #
-# OWNERSHIP WARNING (fixed): `.local` is the XDG base dir — the supervised
-# gateway (as the `hermes` user) writes `$HOME/.local/state` there
+# OWNERSHIP WARNING (fixed): `.local` is the XDG base dir under HOME — the
+# supervised gateway (as the `hermes` user) writes `$HOME/.local/state` there
 # (gateway/status.py). Because this entrypoint runs as root, a root-created
 # `.local` stays root-owned unless we hand it back; upstream's stage2-hook
 # chowns only its canonical subdir list (cron/sessions/logs/... lazy-packages)
@@ -153,6 +156,11 @@ esac
 # stage2-hook will (HERMES_UID/PUID + HERMES_GID/PGID remap, else the baked
 # `hermes` user) so a later usermod cannot strand the ownership. Idempotent,
 # and it also heals a warm volume that an earlier boot left root-owned.
+#
+# HOME is /data, so the volume ROOT must be writable by the runtime user too
+# (HOME-anchored files such as .gitconfig, .cache, .config). stage2-hook only
+# chowns $HERMES_HOME, so we chown the top-level /data directory here,
+# non-recursively: its contents stay as they are.
 : "${HERMES_HOME:=/data/.hermes}"
 
 # Compute the uid/gid Hermes' supervised services will actually run as.
@@ -173,8 +181,13 @@ if [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
     chown_uid="$runtime_uid:$runtime_gid"
 fi
 
+if [ -n "$chown_uid" ] && [ -d "$runtime_home" ]; then
+    chown "$chown_uid" "$runtime_home" 2>/dev/null || true
+fi
+
 if [ -x /opt/hermes/.venv/bin/hermes ]; then
-    link_dir="$HERMES_HOME/.local/bin"
+    # `hermes doctor` checks ~/.local/bin/hermes, and ~ is $runtime_home (/data).
+    link_dir="$runtime_home/.local/bin"
     target="/opt/hermes/.venv/bin/hermes"
     (
         if [ ! -e "$link_dir/hermes" ]; then
@@ -187,8 +200,8 @@ if [ -x /opt/hermes/.venv/bin/hermes ]; then
     # leftovers). `chown -R` uses -P semantics during traversal — it does not
     # follow the bin/hermes symlink, so the sealed venv binary is never touched
     # (the symlink's own ownership may flip, which is harmless).
-    if [ -n "$chown_uid" ] && [ -d "$HERMES_HOME/.local" ]; then
-        chown -R "$chown_uid" "$HERMES_HOME/.local" 2>/dev/null || true
+    if [ -n "$chown_uid" ] && [ -d "$runtime_home/.local" ]; then
+        chown -R "$chown_uid" "$runtime_home/.local" 2>/dev/null || true
     fi
 fi
 
@@ -203,7 +216,7 @@ browser_label="off"
 for _chromium in /opt/hermes/tools/chromium-* /opt/hermes/.playwright; do
     [ -e "$_chromium" ] && browser_label="on"
 done
-echo "[railway-entrypoint] PORT=$PORT HERMES_DASHBOARD_PORT=$HERMES_DASHBOARD_PORT HERMES_HOME=${HERMES_HOME:-} auth_provider=$auth_label browser=$browser_label"
+echo "[railway-entrypoint] PORT=$PORT HERMES_DASHBOARD_PORT=$HERMES_DASHBOARD_PORT HOME=$runtime_home HERMES_HOME=${HERMES_HOME:-} auth_provider=$auth_label browser=$browser_label"
 
 # Delegate to the upstream dispatcher rather than /init directly. The
 # dispatcher preserves Hermes' normal s6-overlay PID-1 path and its wrapped-

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Prune the official Hermes image down to the Railway dashboard + gateway
-# runtime, align HOME with this template's HERMES_HOME layout, and verify
+# runtime, set HOME to /data so the Hermes home is the official ~/.hermes
+# (/data/.hermes), and verify
 # the result. The pruned tree is flattened into a fresh stage by Dockerfile.
 #
 #   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
@@ -426,30 +427,88 @@ find /opt/hermes -xdev \
 # Remove Python bytecode caches anywhere else in the runtime tree as well.
 find / -xdev -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 
-# --- HOME alignment for this template's data layout ------------------------
-# This template sets HERMES_HOME=/data/.hermes, but upstream v0.21.6
-# hard-codes HOME=/opt/data in the dashboard s6 service and in the main
-# program wrapper. Left unpatched, HOME-anchored state (git config, .netrc,
-# provider SDK config, XDG state) would land in the non-persistent /opt/data
-# skeleton instead of the mounted volume. Re-point both at $HERMES_HOME;
-# the upstream stage2 hook guarantees $HERMES_HOME exists (root mkdir -p)
-# before any supervised process starts. Fail loudly if the upstream lines
-# drift so a version bump is caught at build time.
-for f in /etc/s6-overlay/s6-rc.d/dashboard/run /opt/hermes/docker/main-wrapper.sh; do
-    grep -q '^export HOME=/opt/data$' "$f" || {
+# --- HOME for this template's data layout ----------------------------------
+# The official Hermes home is ~/.hermes, i.e. $HOME/.hermes. This template
+# keeps all state on the persistent volume at /data, so HOME is /data and the
+# Hermes home is /data/.hermes (= ~/.hermes). Upstream v0.21.6 hard-codes
+# HOME=/opt/data in the dashboard s6 service and in the main program wrapper;
+# re-point both at /data. Left unpatched, HOME-anchored state (git config,
+# .netrc, provider SDK config, XDG state) would land in the non-persistent
+# /opt/data skeleton instead of the mounted volume. Fail loudly if the
+# upstream lines drift so a version bump is caught at build time.
+for f in /etc/s6-overlay/s6-rc.d/dashboard/run /opt/hermes/docker/s6-rc.d/dashboard/run /opt/hermes/docker/main-wrapper.sh; do
+    grep -qF 'export HOME=/opt/data' "$f" || {
         echo "ERROR: HOME line not found in $f — update this patch for the pinned Hermes release" >&2
         exit 1
     }
-    grep -q '^cd /opt/data$' "$f" || {
+    grep -qF 'cd /opt/data' "$f" || {
         echo "ERROR: cwd line not found in $f — update this patch for the pinned Hermes release" >&2
         exit 1
     }
-    sed -i 's|^export HOME=/opt/data$|export HOME="$HERMES_HOME"|' "$f"
-    sed -i 's|^cd /opt/data$|cd "$HERMES_HOME"|' "$f"
+    sed -i 's|^export HOME=/opt/data$|export HOME=/data|' "$f"
+    sed -i 's|^cd /opt/data$|cd /data|' "$f"
+    grep -qx 'export HOME=/data' "$f" && grep -qx 'cd /data' "$f" || {
+        echo "ERROR: HOME/cwd patch did not apply to $f" >&2
+        exit 1
+    }
 done
-echo "  patched: HOME aligned to \$HERMES_HOME (dashboard/run + main-wrapper)"
+echo "  patched: HOME=/data (Hermes home ~/.hermes = /data/.hermes) in dashboard/run + main-wrapper"
 
-# --- /opt/data -> /data/.hermes compatibility symlink -----------------------
+# --- Every other runtime HOME / Hermes-home default -------------------------
+# The HOME alignment above covers the dashboard and main wrapper only. Upstream
+# also sets HOME=/opt/data in: the privilege-drop shim /opt/hermes/bin/hermes
+# (every root `hermes` command in a shell runs through it), the gateway s6
+# script that service_manager.py renders at runtime (the Telegram gateway), and
+# the boot/fallback defaults for HERMES_HOME. Patch them all to the same layout.
+# Each patch checks its anchor first and fails the build if upstream drifted.
+for f in /opt/hermes/bin/hermes /opt/hermes/docker/hermes-exec-shim.sh; do
+    grep -qxF 'export HOME=/opt/data' "$f" || {
+        echo "ERROR: shim HOME line not found in $f — update this patch for the pinned Hermes release" >&2
+        exit 1
+    }
+    sed -i 's|^export HOME=/opt/data$|export HOME=/data|' "$f"
+done
+
+_svc=/opt/hermes/hermes_cli/service_manager.py
+for pat in '"export HOME=/opt/data",' '"cd /opt/data",' 'os.environ.get("HERMES_HOME", "/opt/data")' 'HERMES_HOME:=/opt/data}}'; do
+    grep -qF "$pat" "$_svc" || {
+        echo "ERROR: $pat not found in $_svc — update this patch for the pinned Hermes release" >&2
+        exit 1
+    }
+done
+sed -i \
+    -e 's|"export HOME=/opt/data",|"export HOME=/data",|' \
+    -e 's|"cd /opt/data",|"cd /data",|' \
+    -e 's|os.environ.get("HERMES_HOME", "/opt/data")|os.environ.get("HERMES_HOME", "/data/.hermes")|' \
+    -e 's|HERMES_HOME:=/opt/data}}|HERMES_HOME:=/data/.hermes}}|' \
+    "$_svc"
+
+_boot=/opt/hermes/hermes_cli/container_boot.py
+grep -qF 'os.environ.get("HERMES_HOME", "/opt/data")' "$_boot" || {
+    echo "ERROR: HERMES_HOME fallback not found in $_boot — update this patch for the pinned Hermes release" >&2
+    exit 1
+}
+sed -i 's|os.environ.get("HERMES_HOME", "/opt/data")|os.environ.get("HERMES_HOME", "/data/.hermes")|' "$_boot"
+
+_stage2=/opt/hermes/docker/stage2-hook.sh
+grep -qF 'HERMES_HOME="${HERMES_HOME:-/opt/data}"' "$_stage2" || {
+    echo "ERROR: HERMES_HOME fallback not found in $_stage2 — update this patch for the pinned Hermes release" >&2
+    exit 1
+}
+sed -i 's|HERMES_HOME="${HERMES_HOME:-/opt/data}"|HERMES_HOME="${HERMES_HOME:-/data/.hermes}"|' "$_stage2"
+
+# Nothing runnable may still hard-code the old home.
+for f in /opt/hermes/bin/hermes /opt/hermes/docker/hermes-exec-shim.sh /opt/hermes/docker/main-wrapper.sh \
+         /etc/s6-overlay/s6-rc.d/dashboard/run /opt/hermes/docker/s6-rc.d/dashboard/run "$_svc" "$_boot" "$_stage2"; do
+    ! grep -qE 'HOME=/opt/data|cd /opt/data|:-/opt/data|:=/opt/data|"/opt/data"' "$f" || {
+        echo "ERROR: $f still runs with /opt/data after the HOME patches" >&2
+        grep -nE 'HOME=/opt/data|cd /opt/data|:-/opt/data|:=/opt/data|"/opt/data"' "$f" >&2
+        exit 1
+    }
+done
+echo "  patched: shim HOME, gateway s6 script renderer, HERMES_HOME fallbacks (no runnable /opt/data left)"
+
+# --- /opt/data -> /data compatibility symlink -------------------------------
 # The sed patch above only covers STATIC image files. Upstream also renders
 # per-profile gateway s6 scripts at RUNTIME (hermes_cli/service_manager.py
 # hard-codes `export HOME=/opt/data` + `cd /opt/data` and writes them to the
@@ -458,14 +517,15 @@ echo "  patched: HOME aligned to \$HERMES_HOME (dashboard/run + main-wrapper)"
 # so a static patch alone leaves its HOME-anchored state (git config, .netrc,
 # provider SDK config, XDG state) in the non-persistent /opt/data skeleton.
 #
-# Replacing the hermes user's home skeleton with a symlink into the template's
-# data root makes EVERY current and future /opt/data reference (static
-# scripts, generated scripts, HOME fallbacks) resolve to /data/.hermes.
-# The upstream stage2 hook guarantees /data/.hermes exists (root mkdir -p +
-# chown) before any supervised process starts, so the link never dangles.
+# Replacing the hermes user's home skeleton with a symlink to the template's
+# HOME (/data) makes EVERY current and future /opt/data reference (static
+# scripts, generated scripts, HOME fallbacks) resolve to the same place as
+# HOME: /opt/data/.hermes is /data/.hermes. The link is dangling at build
+# time, which is fine: Railway mounts the volume at /data, and the entrypoint
+# and upstream stage2 hook create what they need under it.
 rm -rf /opt/data
-ln -s /data/.hermes /opt/data
-echo "  linked: /opt/data -> /data/.hermes"
+ln -s /data /opt/data
+echo "  linked: /opt/data -> /data"
 
 # --- Dashboard/gateway child launches: run on the image venv, not the store ---
 # Upstream v0.21.6 defect in docker images: hermes_cli/_launchers.py::runtime_command
@@ -538,7 +598,8 @@ echo "  verified: dashboard child launch path boots ($LAUNCH_OUT)"
 # Upstream denies credential basenames (.env, auth.json, config.yaml, ...) and
 # the mcp-tokens/ and pairing/ trees, but not the paths below. This template
 # leaves HERMES_DASHBOARD_FILES_ROOT unset, so the browser is unlocked: it opens
-# at $HOME (/data/.hermes) and can go up to /. The guard is therefore extended to:
+# at $HOME (/data) and can go up to /; the Hermes home /data/.hermes is one
+# click in. The guard is therefore extended to:
 #   /proc  (absolute root)  /proc/<pid>/environ exposes every container secret
 #                           (Telegram token, model keys, dashboard password).
 #   /run   (absolute root)  s6-overlay writes each container env var to

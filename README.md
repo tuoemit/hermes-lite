@@ -23,7 +23,7 @@ One container, two supervised processes:
 | **Dashboard** | Web UI on the Railway `PORT`; login via Basic Auth (or OAuth/OIDC). |
 | **Gateway** (`gateway-default`, s6 slot) | Telegram bot, cron, all messaging work. Auto-restarted by s6. |
 
-All state lives under `HERMES_HOME=/data/.hermes` (ephemeral by default; see **Storage**).
+All state lives in the official Hermes home `~/.hermes`, which is `/data/.hermes` here (`HOME=/data`; ephemeral by default; see **Storage**).
 
 ---
 
@@ -99,8 +99,9 @@ That's all. The template fills in the rest automatically:
 
 ## Storage: ephemeral by default, volume optional
 
-Free-tier mode runs **without a volume**. Everything under `/data/.hermes` — config, credentials,
-sessions, memories, skills, logs, cron state — is recreated on every deploy or container recreate.
+Free-tier mode runs **without a volume**. Everything under `/data/.hermes` (the official Hermes home
+`~/.hermes`, with `HOME=/data`) — config, credentials, sessions, memories, skills, logs, cron state — is
+recreated on every deploy or container recreate.
 
 In practice:
 
@@ -111,6 +112,13 @@ In practice:
 To opt into persistence, attach a Railway **Volume at `/data`** — nothing else changes. Note that with
 a volume attached, config-schema migrations (from `/opt/hermes/scripts/docker_config_migrate.py`) run at
 boot as upstream intends.
+
+**Home layout.** The runtime user's `HOME` is `/data`, so the official `~/.hermes` is `/data/.hermes`.
+`/opt/data` is a symlink to `/data`, so the upstream `/opt/data` paths resolve to the same place. Existing
+volumes keep their data with no migration. Two things move because they follow `HOME`: the gateway's XDG
+state (`.local/state`) is now `/data/.local/state`, and the `hermes doctor` launcher link is
+`/data/.local/bin/hermes`. The old `/data/.hermes/.local` folder on a warm volume is harmless and can be
+deleted.
 
 ---
 
@@ -157,8 +165,9 @@ GET /api/health
   expose version and component health, not secrets. (Verified against v0.21.6.)
 - Dashboard login supports a **pre-hashed password** (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`) — see
   *Credential hygiene* below. Prefer it so the plaintext never enters the container environment.
-- The dashboard file browser opens at `/data/.hermes` and can move freely through the directories it can read
-  (`HERMES_DASHBOARD_FILES_ROOT` is intentionally unset in the Dockerfile; set it to lock the browser to one folder).
+- The dashboard file browser opens at `/data` (the runtime `HOME`), where `.hermes` is the Hermes home. It can
+  move freely through the directories it can read (`HERMES_DASHBOARD_FILES_ROOT` is intentionally unset in the
+  Dockerfile; set it to lock the browser to one folder).
   The file browser and spot editor deny `/proc`, `/run`, and any `.dash` folder (sensitive-path guard). So dashboard-UI
   access cannot read `/proc/<pid>/environ`, the Railway secrets in `/run/s6/container_environment`, or the dashboard
   session-signing secret in `/data/.hermes/.dash/`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
@@ -220,7 +229,8 @@ Dashboard          Gateway          (Telegram, cron)
    │                 │
    └──────┬──────────┘
           ▼
-     /data/.hermes          (HERMES_HOME; volume at /data optional)
+     /data                  (HOME, the volume root)
+     /data/.hermes          (~/.hermes = HERMES_HOME)
 ```
 
 The container's CMD is `gateway run`; under s6 the gateway runs as the `gateway-default` service slot and
@@ -253,6 +263,22 @@ image is rebuilt. Do not run `hermes pm repair`: it rebuilds the whole dependenc
 Not expected on the default build, which keeps Node and npm (`KEEP_TUI=1`). If you built with `KEEP_TUI=0`, the
 warning is expected: Node and npm were removed. Rebuild with `KEEP_TUI=1` to clear it.
 
+**`doctor` says "No host gateway owns the gateway role"**
+The gateway's host record is owned by the `hermes` user, and Hermes refuses to read a record owned by
+another user. So when the venv binary is run directly as `root` (for example
+`/opt/hermes/.venv/bin/hermes doctor`), the gateway is invisible and the doctor reports a false warning.
+The `hermes` command on PATH is a shim that drops to the `hermes` user first, so `hermes doctor` typed in
+the shell runs as `hermes` and reads the record normally. If the warning still shows there, it is not this
+cause. Check the real state as the `hermes` user, with the same home the gateway uses:
+
+```sh
+runuser -u hermes -- env HOME=/data HERMES_HOME=/data/.hermes hermes doctor
+```
+
+The dashboard's Doctor button runs as `hermes` with the container's `HERMES_HOME`, so it should not show
+this warning. If the `hermes`-user doctor run also reports no gateway, the gateway is really down. See
+"Dashboard up, but the bot is dark" above.
+
 **Free-tier reality check**
 Budget honestly: 0.5 GB RAM is shared by gateway + dashboard + the bot's work. Reduce concurrent load
 (fewer platforms/cron jobs/heavy skills) first; move to a paid plan for real headroom. Nothing in the
@@ -280,7 +306,7 @@ Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned b
 3. Re-verify the anchored patches in `prune.sh` against the new image. Each one exits non-zero if its upstream
    line drifted: the `whatsapp_cloud` entry in `gateway/run.py`, the `/proc` guard in
    `hermes_cli/web_routers/files.py`, the `HOME=/opt/data` / `cd /opt/data` lines in `dashboard/run` and
-   `main-wrapper.sh`.
+   `main-wrapper.sh` (patched to `HOME=/data` / `cd /data`).
 4. Check the managed tool-store paths (`/opt/hermes/tools/chromium-*`, `node-*`, `npm-*`, `ffmpeg-*`,
    `python-*`, `ripgrep-*`) and `/etc/hermes/agent-browser-executable-path` still match the prune rules.
 5. Reconcile the venv security block: if the new release already ships fixed `httpx2`/`httpcore2`, the block
@@ -294,7 +320,7 @@ Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned b
 | File | Purpose |
 |---|---|
 | `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; `KEEP_BROWSER`/`KEEP_TUI` build-args; Railway runtime env. |
-| `prune.sh` | Removes build-only + out-of-scope content, aligns `HOME` with `HERMES_HOME`, upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
+| `prune.sh` | Removes build-only + out-of-scope content, sets `HOME` to `/data` (`~/.hermes` = `/data/.hermes`), upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
 | `railway-entrypoint.sh` | Validates `PORT`, routes `ADMIN_USERNAME`/`ADMIN_PASSWORD` aliases, auto-generates the session secret, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
 | `CHANGELOG.md` | What changed in each pin bump (v0.21.3 → v0.21.6), and how it was verified. |

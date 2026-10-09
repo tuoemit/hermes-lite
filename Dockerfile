@@ -72,11 +72,14 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
+    # Official Hermes home is ~/.hermes. This template sets HOME=/data (prune.sh aligns the
+    # services to it), so ~/.hermes is /data/.hermes. HERMES_HOME is set to that same path
+    # explicitly because the upstream startup scripts read it.
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
-    # HERMES_DASHBOARD_FILES_ROOT=/data/.hermes is intentionally unset: setting it locks the dashboard
-    # file browser to that folder (no parent navigation). Unset, the browser opens at $HOME, which this
-    # template aligns to $HERMES_HOME (/data/.hermes), and you can go up and back freely.
+    # HERMES_DASHBOARD_FILES_ROOT is intentionally unset: setting it locks the dashboard file browser
+    # to one folder (no parent navigation). Unset, the browser opens at $HOME (/data), so the Hermes
+    # home /data/.hermes is one click in, and you can go up and back freely.
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
@@ -88,7 +91,7 @@ ENV HERMES_DASHBOARD=1 \
 WORKDIR /opt/hermes
 EXPOSE 9119
 
-# The persistent data root (HERMES_HOME=/data/.hermes lives inside it). On
+# The persistent data root: HOME (/data) and the Hermes home ~/.hermes (/data/.hermes) live inside it. On
 # Railway the volume is attached via the UI at /data; this declaration keeps
 # `docker run` / compose users on the same contract. Data is ephemeral by
 # design when no volume is attached.

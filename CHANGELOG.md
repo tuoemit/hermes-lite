@@ -1,5 +1,27 @@
 # Changelog
 
+## Hermes home is the official `~/.hermes`
+
+- *Layout.* The runtime user's `HOME` is `/data` (was `/data/.hermes`), so the official Hermes home
+  `~/.hermes` is `/data/.hermes`. `HERMES_HOME` stays set to that same path because upstream's startup scripts
+  read it.
+- *Every runnable HOME.* `prune.sh` sets `HOME=/data` in each place upstream hard-codes `/opt/data`:
+  the dashboard s6 service and `main-wrapper.sh` (plus the inactive copy under `docker/s6-rc.d`); the
+  `hermes` privilege-drop shim (`/opt/hermes/bin/hermes`, which every shell `hermes` command runs through); and
+  the gateway s6 script that `service_manager.py` renders at runtime (the Telegram gateway). The `HERMES_HOME`
+  fallbacks in `service_manager.py`, `container_boot.py`, and `stage2-hook.sh` now default to `/data/.hermes`.
+  Each patch fails the build if its upstream anchor drifts, and a final check fails if a runnable `/opt/data`
+  reference remains. Comments and docs still mention `/opt/data`; they do not run.
+- *`/opt/data` symlink.* now points at `/data` (was `/data/.hermes`). `/opt/data/.hermes` is `/data/.hermes`.
+- *Volume root writable.* `railway-entrypoint.sh` chowns the top-level `/data` to the runtime uid/gid,
+  non-recursively. HOME-anchored files (`.gitconfig`, `.cache`, `.config`) need it.
+- *Doctor launcher and `.local`.* The `hermes doctor` launcher link and the `.local` chown now use
+  `/data/.local`, the runtime `HOME`. The boot banner prints `HOME=/data`.
+- *File browser.* Opens at `$HOME` (`/data`). `.hermes` is one click in. Browsing stays free; the `/proc`,
+  `/run`, and `.dash` guard is unchanged.
+- *Moved state.* The XDG state (`.local/state`, including the gateway lock record) moves from
+  `/data/.hermes/.local` to `/data/.local`. Existing volumes keep their data; the old `.local` folder is inert.
+
 ## v0.21.6 — Hermes Agent pin moved from v0.21.3 to v0.21.6
 
 Pinned image (tag **and** digest):
