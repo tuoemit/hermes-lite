@@ -72,9 +72,11 @@ ENV PYTHONUNBUFFERED=1 \
     HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
     HERMES_TUI_DIR=/opt/hermes/ui-tui \
     XDG_RUNTIME_DIR=/tmp/hermes-runtime \
-    # Official Hermes home is ~/.hermes. This template sets HOME=/data (prune.sh aligns the
-    # services to it), so ~/.hermes is /data/.hermes. HERMES_HOME is set to that same path
-    # explicitly because the upstream startup scripts read it.
+    # Official Hermes home is ~/.hermes. HOME is /data for every process, including root shells and
+    # direct root runs (the gateway's lock/record dir is $HOME/.local/state/hermes, so a root run with
+    # HOME=/root cannot see the gateway). ~/.hermes is therefore /data/.hermes. HERMES_HOME is set to
+    # that same path explicitly because the upstream startup scripts read it.
+    HOME=/data \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
     # HERMES_DASHBOARD_FILES_ROOT is intentionally unset: setting it locks the dashboard file browser

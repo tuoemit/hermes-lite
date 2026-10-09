@@ -267,9 +267,11 @@ warning is expected: Node and npm were removed. Rebuild with `KEEP_TUI=1` to cle
 The gateway's host record is owned by the `hermes` user, and Hermes refuses to read a record owned by
 another user. So when the venv binary is run directly as `root` (for example
 `/opt/hermes/.venv/bin/hermes doctor`), the gateway is invisible and the doctor reports a false warning.
-The `hermes` command on PATH is a shim that drops to the `hermes` user first, so `hermes doctor` typed in
-the shell runs as `hermes` and reads the record normally. If the warning still shows there, it is not this
-cause. Check the real state as the `hermes` user, with the same home the gateway uses:
+The image sets `HOME=/data` for every process, including root shells, so direct root runs now look in the
+same lock dir as the gateway. If you still see the warning, check that the gateway is up
+(`/command/s6-svstat /run/service/gateway-default` should say `up`, and
+`/data/.local/state/hermes/gateway-locks/host-gateway.json` should exist), then run the doctor as the
+gateway's user:
 
 ```sh
 runuser -u hermes -- env HOME=/data HERMES_HOME=/data/.hermes hermes doctor

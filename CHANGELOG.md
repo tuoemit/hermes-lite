@@ -19,6 +19,9 @@
   `/data/.local`, the runtime `HOME`. The boot banner prints `HOME=/data`.
 - *File browser.* Opens at `$HOME` (`/data`). `.hermes` is one click in. Browsing stays free; the `/proc`,
   `/run`, and `.dash` guard is unchanged.
+- *Root uses the same home.* The image sets `HOME=/data` for every process, not only the services. A direct root
+  run of the venv binary (for example `/opt/hermes/.venv/bin/hermes doctor`) previously used `HOME=/root`, which
+  looked in the wrong lock dir and reported "No host gateway owns the gateway role" while the gateway was up.
 - *Moved state.* The XDG state (`.local/state`, including the gateway lock record) moves from
   `/data/.hermes/.local` to `/data/.local`. Existing volumes keep their data; the old `.local` folder is inert.
 
