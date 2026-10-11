@@ -12,6 +12,21 @@ compile(source, 'hermes_lite_model_studio.py', 'exec')
 page = Path('model-studio.html').read_text(encoding='utf-8')
 assert '__HERMES_SESSION_TOKEN__' in page
 assert '/api/credentials/pool' in page
+assert '<title>Hermes · LLMs Studio</title>' in page
+assert '<span>Dashboard</span>' in page and 'M19 12H5' in page
+assert 'aria-expanded="false"' in page and 'Providers List' in page
+assert 'Add Custom Provider' in page and 'Active providers' in page
+assert 'id="builtinOverlay"' in page and 'id="customOverlay"' in page
+assert "content.inert=!open" in page
+assert "if(isCustom)$('#builtinModalBody').innerHTML=''" in page
+assert 'class="studio-fab"' not in page
+prune = Path('prune.sh').read_text(encoding='utf-8')
+marker = "# --- Hermes-lite LLMs Studio: same-origin page + dashboard switch"
+block = prune[prune.index(marker):]
+start = block.index("/opt/hermes/.venv/bin/python3 - <<'PY'")
+start = block.index('\n', start) + 1
+end = block.index('\nPY', start)
+compile(block[start:end], 'prune-studio-injection.py', 'exec')
 PY
 jq -e '
   .build.builder == "DOCKERFILE" and
@@ -29,6 +44,8 @@ grep -q 'hermes_lite_model_studio.py' Dockerfile
 grep -q 'model-studio.html' Dockerfile
 grep -q 'app.include_router(_hermes_lite_model_studio_routes.router)' prune.sh
 grep -q 'model-studio/switch?dashboard=studio' prune.sh
+grep -q '✦ LLMs Studio' prune.sh
+grep -q 'bottom:18px' prune.sh
 grep -q '@router.get("/model-studio/switch"' hermes_lite_model_studio.py
 grep -q '/api/credentials/pool' model-studio.html
 grep -q 'exec /opt/hermes/docker/entrypoint-dispatch.sh' railway-entrypoint.sh
@@ -105,5 +122,5 @@ if [ "$status" -ne 0 ]; then
     exit 1
 fi
 
-echo 'validate-template: shell syntax, Railway config, feature defaults, PORT/OIDC preflight and Model Studio wiring OK'
+echo 'validate-template: shell syntax, Railway config, feature defaults, PORT/OIDC preflight and LLMs Studio wiring OK'
 echo 'validate-template: Docker image build and live Railway behavior still require integration testing'

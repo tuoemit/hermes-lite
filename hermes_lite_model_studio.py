@@ -1,4 +1,4 @@
-"""Hermes-lite Model Studio routes, mounted into the upstream dashboard at build time.
+"""Hermes-lite LLMs Studio routes, mounted into the upstream dashboard at build time.
 
 The UI intentionally delegates model/key writes to Hermes' own config, .env and
 credential-pool APIs. This router only serves the standalone page, exposes a
@@ -36,7 +36,7 @@ class CustomEndpointPayload(BaseModel):
 def model_studio_page():
     """Serve the standalone provider editor inside Hermes' existing auth boundary."""
     if not _PAGE.is_file():
-        raise HTTPException(status_code=404, detail="Model Studio page is missing")
+        raise HTTPException(status_code=404, detail="LLMs Studio page is missing")
     source = _PAGE.read_text(encoding="utf-8")
     # The upstream dashboard's loopback-only session-token auth also protects
     # /api/* for non-OAuth local installs. Railway's Basic/OIDC session cookie
@@ -52,7 +52,7 @@ def model_studio_page():
 
 @router.get("/model-studio/switch", include_in_schema=False)
 def switch_dashboard(dashboard: str = "studio"):
-    """Dashboard switch handler: move between Model Studio and upstream Hermes UI."""
+    """Dashboard switch handler: move between LLMs Studio and upstream Hermes UI."""
     if dashboard == "studio":
         return RedirectResponse(url="/model-studio", status_code=303)
     if dashboard == "hermes":
@@ -158,7 +158,7 @@ def save_custom_endpoint(body: CustomEndpointPayload, profile: Optional[str] = N
             endpoint_id, entry = config_env._write_custom_endpoint(cfg, request)
             migrated_key_env = str(entry.get("key_env") or "").strip()
             # The generic endpoint helper preserves an existing API mode when
-            # the payload asks for auto-detection; Model Studio exposes an
+            # the payload asks for auto-detection; LLMs Studio exposes an
             # explicit auto choice, so clear stale pins here.
             if api_mode:
                 entry["api_mode"] = api_mode

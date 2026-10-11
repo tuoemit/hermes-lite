@@ -142,13 +142,14 @@ volume allowance. The project’s prior verification recorded about 2.3 GB of re
 writable-volume capacity. Prefer Hobby or higher for the full-feature production profile. For Free/Trial,
 `KEEP_BROWSER=0` is a deliberate feature compromise, not a guarantee that all resource limits will be sufficient.
 
-## Model Studio — provider setup in the dashboard
+## LLMs Studio — provider setup in the dashboard
 
-The build adds a same-origin **Model Studio** page at `/model-studio` and a **Model Studio** shortcut in the
-stock Hermes dashboard. Use the page header's **Hermes dashboard** link to switch back; both directions go
-through the `/model-studio/switch` handler, so this adds no port or separate server.
+The build adds a same-origin **LLMs Studio** page at `/model-studio` and a **✦ LLMs Studio** shortcut at the
+bottom-right of the stock Hermes dashboard. Use the page header's **Dashboard** link to switch back; both
+directions go through the `/model-studio/switch` handler, so this adds no port or separate server. Provider
+configuration opens in focused overlays, while the main page shows the provider directory and active providers.
 
-Model Studio reads Hermes' installed provider/model catalog at runtime, so its built-in provider list follows
+LLMs Studio reads Hermes' installed provider/model catalog at runtime, so its built-in provider list follows
 the pinned Hermes release. Built-in providers use the environment-variable names Hermes declares. Custom
 providers can be created and edited with a display name, model ID, base URL, API mode, and a user-chosen
 `key_env` variable name. Model IDs remain free-form; catalog suggestions do not limit entry.
@@ -416,10 +417,10 @@ Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned b
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; preserves browser/TUI by default; installs the same-origin Model Studio page and router; Railway runtime env. |
-| `prune.sh` | Removes build-only content, preserves supported platform adapters, aligns `HOME` to `/data`, upgrades selected pinned dependencies, mounts Model Studio and its dashboard switch link, and verifies runtime assets, optional browser/TUI, dashboard startup and shared-library integrity. |
+| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; preserves browser/TUI by default; installs the same-origin LLMs Studio page and router; Railway runtime env. |
+| `prune.sh` | Removes build-only content, preserves supported platform adapters, aligns `HOME` to `/data`, upgrades selected pinned dependencies, mounts LLMs Studio and its dashboard switch link, and verifies runtime assets, optional browser/TUI, dashboard startup and shared-library integrity. |
 | `hermes_lite_model_studio.py` | Serves `/model-studio`, implements the UI-switch handler, returns a secret-free settings snapshot, and saves named providers with an editable `key_env`. |
-| `model-studio.html` | Self-contained provider/model editor. Uses Hermes APIs for provider discovery, `.env` credentials and unlimited secondary `auth.json` credential-pool keys. |
+| `model-studio.html` | Self-contained LLMs Studio interface with a provider directory, active-provider list, and overlay-based setup. Uses Hermes APIs for provider discovery, `.env` credentials and unlimited secondary `auth.json` credential-pool keys. |
 | `railway-entrypoint.sh` | Validates `PORT`, routes `ADMIN_USERNAME`/`ADMIN_PASSWORD` aliases, auto-generates the session secret, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
 | `CHANGELOG.md` | What changed in each pin bump (v0.21.3 → v0.21.6), and how it was verified. |

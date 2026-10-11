@@ -460,7 +460,7 @@ for f in /opt/hermes/bin/hermes /opt/hermes/docker/hermes-exec-shim.sh /opt/herm
 done
 echo "  patched: shim HOME, gateway s6 script renderer, HERMES_HOME fallbacks (no runnable /opt/data left)"
 
-# --- Hermes-lite Model Studio: same-origin page + dashboard switch ----------
+# --- Hermes-lite LLMs Studio: same-origin page + dashboard switch ----------
 # The provider editor reuses Hermes' authenticated config/env/credential-pool
 # APIs. Mount its small route before the SPA catch-all, and add a link in the
 # stock dashboard so users can switch between the two UIs without another port.
@@ -473,7 +473,7 @@ src = server.read_text(encoding="utf-8")
 import_anchor = "    shared_metrics as _shared_metrics_routes,\n)"
 include_anchor = "app.include_router(_shared_metrics_routes.router)\n"
 if src.count(import_anchor) != 1 or src.count(include_anchor) != 1:
-    raise SystemExit("ERROR: Hermes web_server route-mount anchors drifted; update Model Studio integration")
+    raise SystemExit("ERROR: Hermes web_server route-mount anchors drifted; update LLMs Studio integration")
 src = src.replace(import_anchor,
                   "    shared_metrics as _shared_metrics_routes,\n"
                   "    hermes_lite_model_studio as _hermes_lite_model_studio_routes,\n)", 1)
@@ -483,7 +483,7 @@ server.write_text(src, encoding="utf-8")
 
 page = Path("/opt/hermes/hermes_cli/web_dist/model-studio.html")
 if not page.is_file():
-    raise SystemExit("ERROR: Model Studio HTML was not copied into the Hermes web_dist directory")
+    raise SystemExit("ERROR: LLMs Studio HTML was not copied into the Hermes web_dist directory")
 index = Path("/opt/hermes/hermes_cli/web_dist/index.html")
 if not index.is_file():
     raise SystemExit("ERROR: upstream dashboard web_dist/index.html is missing")
@@ -492,13 +492,13 @@ marker = "<!-- hermes-lite-model-studio-link -->"
 if marker not in html:
     if len(re.findall(r"</body>", html, flags=re.IGNORECASE)) != 1:
         raise SystemExit("ERROR: expected exactly one </body> in Hermes dashboard index.html")
-    link = '''\n<!-- hermes-lite-model-studio-link -->\n<style>#hermes-lite-model-studio-link{position:fixed;z-index:2147483000;right:18px;top:76px;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid #d8a64f;border-radius:11px;background:#1b1d20;color:#f5d38d;font:650 13px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 6px 22px #0006}#hermes-lite-model-studio-link:hover{background:#2b261d;border-color:#f0c978;transform:translateY(-1px)}@media(max-width:600px){#hermes-lite-model-studio-link{top:68px;right:10px;padding:8px 10px;font-size:12px}}</style>\n<a id="hermes-lite-model-studio-link" href="/model-studio/switch?dashboard=studio" aria-label="Open Hermes Model Studio">✦ Model Studio</a>\n'''
+    link = '''\n<!-- hermes-lite-model-studio-link -->\n<style>#hermes-lite-model-studio-link{position:fixed;z-index:2147483000;right:18px;bottom:18px;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid #d8a64f;border-radius:11px;background:#1b1d20;color:#f5d38d;font:650 13px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 6px 22px #0006}#hermes-lite-model-studio-link:hover{background:#2b261d;border-color:#f0c978;transform:translateY(-1px)}@media(max-width:600px){#hermes-lite-model-studio-link{bottom:12px;right:10px;padding:8px 10px;font-size:12px}}</style>\n<a id="hermes-lite-model-studio-link" href="/model-studio/switch?dashboard=studio" aria-label="Open Hermes LLMs Studio">✦ LLMs Studio</a>\n'''
     html = re.sub(r"</body>", link + "</body>", html, count=1, flags=re.IGNORECASE)
     index.write_text(html, encoding="utf-8")
-print("  mounted: /model-studio page + dashboard switch handler and stock-dashboard link")
+print("  mounted: /model-studio LLMs Studio page + dashboard switch handler and stock-dashboard link")
 PY
 
-echo "prune verify: Model Studio route, static page, and dashboard-switch link installed"
+echo "prune verify: LLMs Studio route, static page, and dashboard-switch link installed"
 
 # --- /opt/data -> /data compatibility symlink -------------------------------
 # The sed patch above only covers STATIC image files. Upstream also renders

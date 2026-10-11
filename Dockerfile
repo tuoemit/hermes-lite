@@ -36,7 +36,7 @@ ARG KEEP_BROWSER=1
 ARG KEEP_TUI=1
 
 COPY --chmod=0755 prune.sh /prune.sh
-# Hermes-lite Model Studio is mounted as a small same-origin page/router inside
+# Hermes-lite LLMs Studio is mounted as a small same-origin page/router inside
 # Hermes' existing authenticated dashboard; it does not add a service or port.
 COPY --chmod=0644 hermes_lite_model_studio.py /opt/hermes/hermes_cli/web_routers/hermes_lite_model_studio.py
 COPY --chmod=0644 model-studio.html /opt/hermes/hermes_cli/web_dist/model-studio.html
