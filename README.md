@@ -151,8 +151,9 @@ configuration opens in focused overlays, while the main page shows the provider 
 
 LLMs Studio reads Hermes' installed provider/model catalog at runtime, so its built-in provider list follows
 the pinned Hermes release. Built-in providers use the environment-variable names Hermes declares. Custom
-providers can be created and edited with a display name, model ID, base URL, API mode, and a user-chosen
-`key_env` variable name. Model IDs remain free-form; catalog suggestions do not limit entry.
+providers can be created with a provider name that becomes the provider ID (without a separate `name:`
+field in `config.yaml`), base URL, API mode, and a user-chosen `key_env` variable name. Model ID is optional
+unless the provider is being set as the main model route; IDs remain free-form when supplied.
 
 For either a built-in or custom provider, the primary key is saved through Hermes' credential lifecycle to
 `$HERMES_HOME/.env`. Add as many secondary keys as needed: Hermes' credential-pool API stores those in

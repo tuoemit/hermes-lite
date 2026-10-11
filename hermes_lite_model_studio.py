@@ -140,15 +140,20 @@ def save_custom_endpoint(body: CustomEndpointPayload, profile: Optional[str] = N
     model = (body.model or "").strip()
     key_env = (body.key_env or "").strip()
     api_mode = (body.api_mode or "").strip()
-    if not name or not base_url or not model:
-        raise HTTPException(status_code=400, detail="Provider name, base URL, and model are required")
+    if not name or not base_url:
+        raise HTTPException(status_code=400, detail="Provider name and base URL are required")
     if key_env and not _ENV_NAME.fullmatch(key_env):
         raise HTTPException(status_code=400, detail="Key variable must be a valid environment-variable name")
     if api_mode not in {"", "chat_completions", "codex_responses", "anthropic_messages"}:
         raise HTTPException(status_code=400, detail="Unsupported API mode")
 
+    # Hermes' stock helper requires a model even when the endpoint is being
+    # saved without becoming the main route. Use a private sentinel for that
+    # helper call, then remove it from the persisted provider entry below.
+    optional_model_sentinel = "__hermes_lite_optional_model__"
     request = CustomEndpointUpdate(
-        id=(body.id or "").strip(), name=name, base_url=base_url, model=model,
+        id=(body.id or "").strip(), name=name, base_url=base_url,
+        model=model or optional_model_sentinel,
         api_key=None, api_mode=api_mode, discover_models=body.discover_models,
         make_default=False,
     )
@@ -156,6 +161,21 @@ def save_custom_endpoint(body: CustomEndpointPayload, profile: Optional[str] = N
         with config_env._config_profile_scope(profile), config_env._CONFIG_MUTATION_LOCK:
             cfg = config_env.require_readable_config_before_write()
             endpoint_id, entry = config_env._write_custom_endpoint(cfg, request)
+            # The provider name is the ID (the providers.<id> YAML key), not a
+            # second `name:` field inside that provider's config block.
+            entry.pop("name", None)
+            if not model:
+                entry.pop("model", None)
+                entry.pop("default_model", None)
+                models = entry.get("models")
+                if isinstance(models, dict):
+                    models.pop(optional_model_sentinel, None)
+                    if not models:
+                        entry.pop("models", None)
+                elif isinstance(models, list):
+                    entry["models"] = [item for item in models if str(item) != optional_model_sentinel]
+                    if not entry["models"]:
+                        entry.pop("models", None)
             migrated_key_env = str(entry.get("key_env") or "").strip()
             # The generic endpoint helper preserves an existing API mode when
             # the payload asks for auto-detection; LLMs Studio exposes an

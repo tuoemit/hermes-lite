@@ -17,9 +17,17 @@ assert '<span>Dashboard</span>' in page and 'M19 12H5' in page
 assert 'aria-expanded="false"' in page and 'Providers List' in page
 assert 'Add Custom Provider' in page and 'Active providers' in page
 assert 'id="builtinOverlay"' in page and 'id="customOverlay"' in page
+assert '<label>Provider ID</label>' not in page and 'Stable ID' not in page
+assert 'optional unless set as default' in page
+assert "if($('#makeActive')?.checked&&!model)" in page
+assert "id:provider.isDraft?'':provider.id" in page
 assert "content.inert=!open" in page
 assert "if(isCustom)$('#builtinModalBody').innerHTML=''" in page
 assert 'class="studio-fab"' not in page
+assert 'env(safe-area-inset-bottom' in page and 'prefers-reduced-motion:reduce' in page
+backend = Path('hermes_lite_model_studio.py').read_text(encoding='utf-8')
+assert 'entry.pop("name", None)' in backend
+assert 'optional_model_sentinel' in backend
 prune = Path('prune.sh').read_text(encoding='utf-8')
 marker = "# --- Hermes-lite LLMs Studio: same-origin page + dashboard switch"
 block = prune[prune.index(marker):]
@@ -45,7 +53,8 @@ grep -q 'model-studio.html' Dockerfile
 grep -q 'app.include_router(_hermes_lite_model_studio_routes.router)' prune.sh
 grep -q 'model-studio/switch?dashboard=studio' prune.sh
 grep -q '✦ LLMs Studio' prune.sh
-grep -q 'bottom:18px' prune.sh
+grep -q 'safe-area-inset-bottom,0px' prune.sh
+grep -q 'min-height:48px' prune.sh
 grep -q '@router.get("/model-studio/switch"' hermes_lite_model_studio.py
 grep -q '/api/credentials/pool' model-studio.html
 grep -q 'exec /opt/hermes/docker/entrypoint-dispatch.sh' railway-entrypoint.sh
