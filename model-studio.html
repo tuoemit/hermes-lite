@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="hermes-session-token" content="__HERMES_SESSION_TOKEN__">
 <title>Hermes · LLMs Studio</title>
+<style>
 :root {
   color-scheme: dark;
 
@@ -1006,7 +1007,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   grid-column: 1 / -1;
 }
 
-.field > label {
+.field > label:not(.checkrow) {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1072,15 +1073,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 .checkrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 10px !important;
   margin-top: 12px;
   font-size: 13px;
   color: var(--ink);
   cursor: pointer;
   user-select: none;
   min-height: 40px;
+  width: fit-content;
 }
 
 .checkrow input[type="checkbox"] {
@@ -1089,6 +1092,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   accent-color: var(--gold);
   cursor: pointer;
   flex-shrink: 0;
+  margin: 0;
 }
 
 .inline-note {
@@ -1561,6 +1565,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     transition-duration: 0.01ms !important;
   }
 }
+</style>
 </style>
 </head>
 <body>
