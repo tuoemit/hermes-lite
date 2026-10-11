@@ -1,6 +1,6 @@
 # Docker build context exclusions for the hermes-lite Railway template.
-# The context is tiny (six files + this one); these declarations are cheap
-# insurance against editor cruft and accidental secret leakage into the build.
+# Keep the build context limited to the reviewed template sources; these
+# declarations are cheap insurance against editor cruft and accidental secrets.
 
 # VCS / editor / OS noise
 .git

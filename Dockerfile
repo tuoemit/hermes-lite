@@ -25,20 +25,21 @@ USER root
 # bundles its own SQLite, so this checks the interpreter Hermes actually uses.
 RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLite", sqlite3.sqlite_version); sys.exit("ERROR: SQLite WAL-reset fix missing; need >= 3.51.3") if v < (3,51,3) else None'
 
-# Browser automation OFF by default for Railway free-tier-class hosts.
-# Set to 1 only if you need the Chromium-backed browser tools (needs >= 2 GB RAM).
-ARG KEEP_BROWSER=0
+# Preserve the upstream browser toolchain by default. Set KEEP_BROWSER=0 only
+# when you explicitly accept losing browser automation to reduce image/disk/RAM use.
+# Full browser workloads should be deployed with adequate RAM (start at >= 2 GB).
+ARG KEEP_BROWSER=1
 
-# In-browser Chat tab: ON. Node + the prebuilt TUI bundle are kept, so the
-# dashboard's embedded chat and `hermes --tui` work. Keeping Node also keeps the
-# install consistent with the runtime manifest, so startup and the dashboard
-# security audit no longer report "install out of sync (node/npm)". Set to 0 to
-# drop Node and the TUI (smaller image; the Chat tab then fails closed and the
-# out-of-sync warning returns). Browsers (KEEP_BROWSER) have no node dependency
-# either way.
+# Preserve Node and the prebuilt TUI by default. Node may also be required by
+# platform/plugin bridges, so KEEP_TUI=0 is a deliberate feature-reduction mode,
+# not a generic production optimization.
 ARG KEEP_TUI=1
 
 COPY --chmod=0755 prune.sh /prune.sh
+# Hermes-lite Model Studio is mounted as a small same-origin page/router inside
+# Hermes' existing authenticated dashboard; it does not add a service or port.
+COPY --chmod=0644 hermes_lite_model_studio.py /opt/hermes/hermes_cli/web_routers/hermes_lite_model_studio.py
+COPY --chmod=0644 model-studio.html /opt/hermes/hermes_cli/web_dist/model-studio.html
 RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
 
 # ---------------------------------------------------------------------------
@@ -83,9 +84,9 @@ ENV PYTHONUNBUFFERED=1 \
     TERMINAL_HOME_MODE=real \
     HERMES_HOME=/data/.hermes \
     HERMES_WRITE_SAFE_ROOT=/data \
-    # HERMES_DASHBOARD_FILES_ROOT is intentionally unset: setting it locks the dashboard file browser
-    # to one folder (no parent navigation). Unset, the browser opens at $HOME (/data), so the Hermes
-    # home /data/.hermes is one click in, and you can go up and back freely.
+    # Restrict dashboard file browsing to runtime state; do not expose /etc, /opt, or other OS paths.
+    HERMES_DASHBOARD_FILES_ROOT=/data \
+    # The upstream image is sealed/immutable; optional dependencies must be baked into the image.
     HERMES_DISABLE_LAZY_INSTALLS=1 \
     PATH="/opt/hermes/bin:/opt/hermes/.venv/bin:/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 

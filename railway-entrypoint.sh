@@ -12,10 +12,23 @@ case "$PORT" in
         ;;
 esac
 
-if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+# Bound the digit count before shell arithmetic to avoid integer overflow on
+# malformed PORT values. A valid decimal TCP port has at most five digits.
+if [ "${#PORT}" -gt 5 ]; then
     echo "ERROR: PORT must be between 1 and 65535 (got '$PORT')" >&2
     exit 2
 fi
+port_normalized="$PORT"
+while [ "${port_normalized#0}" != "$port_normalized" ]; do
+    port_normalized=${port_normalized#0}
+done
+[ -n "$port_normalized" ] || port_normalized=0
+if [ "$port_normalized" -lt 1 ] || [ "$port_normalized" -gt 65535 ]; then
+    echo "ERROR: PORT must be between 1 and 65535 (got '$PORT')" >&2
+    exit 2
+fi
+PORT="$port_normalized"
+export PORT
 
 # Railway's PORT is authoritative. Allowing a separate dashboard port causes
 # Railway's health probe and Hermes to disagree about where the service lives.
@@ -64,40 +77,66 @@ oauth_ok=0
 if [ -n "${HERMES_DASHBOARD_OAUTH_CLIENT_ID:-}" ]; then
     oauth_ok=1
 fi
+oidc_ok=0
+if [ -n "${HERMES_DASHBOARD_OIDC_ISSUER:-}" ] && \
+   [ -n "${HERMES_DASHBOARD_OIDC_CLIENT_ID:-}" ]; then
+    oidc_ok=1
+fi
 
 # ---- Session-signing secret: auto-generate + persist ------------------------
-# When Basic Auth is in use and the operator set no secret, generate one and
-# persist it so dashboard sessions stay valid across restarts (and are shared
-# by the supervised processes within a boot). Hex-form so the plugin's secret
-# decoder (bytes.fromhex -> 32 bytes) accepts it. Persisted at
-# $HERMES_HOME/.dash/signing-secret (0600): re-used on volume-backed redeploys,
-# regenerated on the ephemeral free tier. Best-effort: if we cannot persist, we
-# still export the in-memory value for this boot and warn (otherwise upstream
-# would fall back to a random per-process key and log everyone out on every
-# restart).
+# When Basic Auth is in use and no secret was configured, generate a 32-byte
+# hex secret. Persist through an atomic temp-file + rename, rather than writing
+# directly through a potentially pre-planted symlink in the writable volume.
+# If the persistence path is unsafe or unwritable, keep this boot functional but
+# warn that browser sessions may not survive a restart.
 if [ "$basic_ok" = 1 ] && [ -z "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}" ]; then
-    secret_file="$HERMES_HOME/.dash/signing-secret"
-    secret_val="$(cat "$secret_file" 2>/dev/null || true)"
+    secret_dir="$HERMES_HOME/.dash"
+    secret_file="$secret_dir/signing-secret"
+    secret_val=""
+    secret_dir_safe=1
+
+    # Never follow a symlink used as the .dash directory or secret file.
+    if [ -L "$HERMES_HOME" ] || { [ -e "$HERMES_HOME" ] && [ ! -d "$HERMES_HOME" ]; } || \
+       [ -L "$secret_dir" ] || { [ -e "$secret_dir" ] && [ ! -d "$secret_dir" ]; }; then
+        secret_dir_safe=0
+        echo "[railway-entrypoint] WARNING: dashboard secret path is not a regular directory; persistence skipped" >&2
+    elif [ ! -L "$secret_file" ] && [ -f "$secret_file" ]; then
+        secret_val="$(cat "$secret_file" 2>/dev/null || true)"
+        case "$secret_val" in
+            *[!0123456789abcdefABCDEF]*|'') secret_val="" ;;
+        esac
+        [ "${#secret_val}" -eq 64 ] || secret_val=""
+        if [ -n "$secret_val" ]; then
+            chmod 700 "$secret_dir" 2>/dev/null || true
+            chmod 600 "$secret_file" 2>/dev/null || true
+        fi
+    fi
+
     if [ -z "$secret_val" ]; then
         secret_val="$(/opt/hermes/.venv/bin/python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || true)"
         if [ -n "$secret_val" ]; then
-            if mkdir -p "$HERMES_HOME/.dash" 2>/dev/null \
-               && printf '%s\n' "$secret_val" > "$secret_file" 2>/dev/null \
-               && chmod 600 "$secret_file" 2>/dev/null; then
-                echo "[railway-entrypoint] generated + persisted HERMES_DASHBOARD_BASIC_AUTH_SECRET ($secret_file)"
+            persisted=0
+            if [ "$secret_dir_safe" = 1 ] && mkdir -p "$secret_dir" 2>/dev/null && chmod 700 "$secret_dir" 2>/dev/null; then
+                secret_tmp="$(mktemp "$secret_dir/.signing-secret.XXXXXX" 2>/dev/null || true)"
+                if [ -n "$secret_tmp" ] &&
+                   (umask 077; printf '%s\n' "$secret_val" > "$secret_tmp") 2>/dev/null &&
+                   chmod 600 "$secret_tmp" 2>/dev/null &&
+                   mv -f "$secret_tmp" "$secret_file" 2>/dev/null; then
+                    persisted=1
+                else
+                    [ -z "${secret_tmp:-}" ] || rm -f "$secret_tmp" 2>/dev/null || true
+                fi
+            fi
+            if [ "$persisted" = 1 ]; then
+                echo "[railway-entrypoint] generated + persisted dashboard session secret"
             else
-                echo "[railway-entrypoint] WARNING: could not persist the generated dashboard secret; sessions may not survive restarts" >&2
+                echo "[railway-entrypoint] WARNING: could not safely persist the generated dashboard secret; sessions may not survive restarts" >&2
             fi
         fi
     fi
     if [ -n "$secret_val" ]; then
-        # Export for this process tree. This is exactly equivalent to the
-        # operator setting a Railway variable: s6-overlay's /init imports the
-        # exec-time environment at startup, and every supervised service
-        # (dashboard, gateways) rehydrates it via its `with-contenv` shebang —
-        # the same path TELEGRAM_BOT_TOKEN and the other runtime variables
-        # take. So the auto-generated secret reaches the dashboard process
-        # without the operator maintaining it.
+        # s6-overlay imports the exec-time environment at startup, and each
+        # supervised service rehydrates it via its with-contenv wrapper.
         export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$secret_val"
     fi
 fi
@@ -117,13 +156,15 @@ case "${HERMES_DASHBOARD:-1}" in
         exit 2
         ;;
     *)
-        if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ]; then
+        if [ "$basic_ok" = 0 ] && [ "$oauth_ok" = 0 ] && [ "$oidc_ok" = 0 ]; then
             echo "ERROR: the dashboard is public but no auth provider is configured." >&2
             echo "       Set ADMIN_USERNAME and ADMIN_PASSWORD (or the canonical" >&2
             echo "       HERMES_DASHBOARD_BASIC_AUTH_USERNAME / _PASSWORD names)." >&2
             echo "       The password hash and the session secret are generated automatically," >&2
             echo "       so you do NOT need to set them." >&2
-            echo "       Or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for OAuth/OIDC." >&2
+            echo "       Or set HERMES_DASHBOARD_OAUTH_CLIENT_ID for Nous OAuth, or" >&2
+            echo "       set BOTH HERMES_DASHBOARD_OIDC_ISSUER and" >&2
+            echo "       HERMES_DASHBOARD_OIDC_CLIENT_ID for self-hosted OIDC." >&2
             exit 2
         fi
         ;;
@@ -206,11 +247,17 @@ if [ -x /opt/hermes/.venv/bin/hermes ]; then
 fi
 
 # Startup banner for Railway log triage: the values that matter at a glance.
+auth_label=""
 if [ "$basic_ok" = 1 ]; then
     auth_label="basic"
-else
-    auth_label="oauth"
 fi
+if [ "$oauth_ok" = 1 ]; then
+    auth_label="${auth_label:+$auth_label+}nous-oauth"
+fi
+if [ "$oidc_ok" = 1 ]; then
+    auth_label="${auth_label:+$auth_label+}oidc"
+fi
+[ -n "$auth_label" ] || auth_label="none"
 browser_label="off"
 # v0.21.x: the pinned Chromium lives in the managed tool store (not /opt/hermes/.playwright).
 for _chromium in /opt/hermes/tools/chromium-* /opt/hermes/.playwright; do

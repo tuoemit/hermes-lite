@@ -1,16 +1,16 @@
 # hermes-lite
 
-**Hermes Agent on Railway** — a thin, production-safe deployment layer around the official
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) container, tuned for low-resource
-(Railway free-tier-class) hosts.
+**Hermes Agent on Railway** — a hardened deployment layer around the official
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) container. The default build preserves
+upstream browser, TUI, and messaging-platform integrations; reduced-feature builds are opt-in.
 
 > **Pinned to Hermes Agent `v0.21.6`** (`nousresearch/hermes-agent:v0.21.6`, multi-arch digest
 > `sha256:55e192fba0cd4fde61142abbff5adeacff40efdb482ccd0ff877924bd274f909`). See [CHANGELOG.md](CHANGELOG.md).
 
-- Telegram bot (the gateway) + the built-in web dashboard, supervised by Hermes' own s6-overlay.
-- WhatsApp, WhatsApp Cloud, and iMessage/Photon are **removed** by design (Telegram-only scope).
-- Browser automation is **disabled** by default (does not fit the free-tier RAM budget).
-- Traced pruning + build-time verification: a broken prune fails the build, not the runtime.
+- Hermes gateway + web dashboard, supervised by upstream s6-overlay.
+- Supported messaging adapters and plugins, including WhatsApp / WhatsApp Cloud / Photon, are retained.
+- Browser automation and the dashboard Chat/TUI runtime are retained by default.
+- Traced pruning + build-time verification: patch drift or missing retained assets fail the build.
 
 ---
 
@@ -21,43 +21,51 @@ One container, two supervised processes:
 | Process | Role |
 |---|---|
 | **Dashboard** | Web UI on the Railway `PORT`; login via Basic Auth (or OAuth/OIDC). |
-| **Gateway** (`gateway-default`, s6 slot) | Telegram bot, cron, all messaging work. Auto-restarted by s6. |
+| **Gateway** (`gateway-default`, s6 slot) | Configured messaging adapters, cron, notification delivery and agent work. Auto-restarted by s6. |
 
-All state lives in the official Hermes home `~/.hermes`, which is `/data/.hermes` here (`HOME=/data`; ephemeral by default; see **Storage**).
+All state lives in the official Hermes home `~/.hermes`, which is `/data/.hermes` here (`HOME=/data`; attach a `/data` volume for production persistence; see **Storage**).
 
 ---
 
 ## Deploy
 
 1. **Create a Railway service** from this repository (Dockerfile builder) and generate a public domain.
-2. **Set variables** (Railway → Variables) — see below.
-3. **Open the public URL**, sign in, and finish Hermes setup (model provider, Telegram token, etc.).
+2. **Attach a Railway Volume mounted at `/data`** before configuring production data.
+3. **Set variables** (Railway → Variables) — see below.
+4. **Open the public URL**, sign in, and finish Hermes setup (model provider and adapter credentials).
 
 ---
 
 ## Variables to set in Railway
 
-The only things you must configure are the **dashboard login** (username + password) and **Telegram**
-(plus `PORT`, which Railway injects automatically). The dashboard's **password hash and session secret
-are generated automatically** — see below.
+Configure one **dashboard authentication provider** and the credentials for each messaging adapter and
+model provider you actually use. `PORT` is injected by Railway; the template maps it to Hermes' dashboard.
+For an internet-facing dashboard, prefer Nous OAuth or a self-hosted OIDC provider. Basic Auth is best kept
+behind a VPN or another trusted access layer. Hermes fails closed if no supported provider is configured.
 
-### Required
+### Dashboard auth (choose one)
+
+| Variable | When to use it |
+|---|---|
+| `ADMIN_USERNAME` + `ADMIN_PASSWORD` | Basic Auth convenience aliases. Store `ADMIN_PASSWORD` as a Railway **secret**. Canonical `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` + `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` also work; canonical values win when both are set. |
+| `HERMES_DASHBOARD_OAUTH_CLIENT_ID` | Nous OAuth provider. For a hosted/public deployment, provision a client ID through Hermes' dashboard registration flow. |
+| `HERMES_DASHBOARD_OIDC_ISSUER` + `HERMES_DASHBOARD_OIDC_CLIENT_ID` | Self-hosted OIDC provider; **both** are required. `HERMES_DASHBOARD_OIDC_CLIENT_SECRET` is optional for a confidential client. `HERMES_DASHBOARD_OIDC_SCOPES` is optional (default `openid profile email`). |
+
+`PORT` is injected automatically by Railway; do not set it to a hard-coded value in Railway Variables. The
+entrypoint maps it to `HERMES_DASHBOARD_PORT`. The dashboard's Basic Auth session secret is generated and
+persisted automatically where writable; see the storage and credential-hygiene sections below.
+
+### Required Railway-provided variable
 
 | Variable | Notes |
 |---|---|
-| `PORT` | Injected automatically by Railway (a system variable — you don't type it). Mapped to the dashboard HTTP port (`HERMES_DASHBOARD_PORT`) and used by the health check. |
-| `ADMIN_USERNAME` | Dashboard login username (alias of `HERMES_DASHBOARD_BASIC_AUTH_USERNAME`). |
-| `ADMIN_PASSWORD` | Dashboard password, Railway **secret** (alias of `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` — only its hash is used at runtime; see *Credential hygiene*). |
+| `PORT` | Injected automatically by Railway. Mapped to the dashboard HTTP port (`HERMES_DASHBOARD_PORT`) and used by the `/api/health` check. |
 
-> Use the short `ADMIN_USERNAME` / `ADMIN_PASSWORD` names, or the canonical
-> `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` / `_PASSWORD` — both work, and the canonical one wins if both
-> are set.
+For Basic Auth, the template fills in the rest automatically:
 
-That's all. The template fills in the rest automatically:
-
-- **Password hash** — Hermes hashes your password in-memory at boot, so you never set a
-  `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`. (If you prefer, you *may* set the pre-computed hash
-  instead of the plaintext — see *Credential hygiene*.)
+- **Password hash** — with Basic Auth, Hermes hashes the configured plaintext password in memory at boot,
+  so you do not need `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`. A pre-computed hash can be configured
+  instead when using the hash-only credential mode (see *Credential hygiene*).
 - **Session secret** — generated + persisted at `$HERMES_HOME/.dash/signing-secret` on first boot, so
   sessions survive restarts without you setting a `HERMES_DASHBOARD_BASIC_AUTH_SECRET`. On the
   volume-backed plan the same secret is reused across redeploys; on the ephemeral free tier it is
@@ -91,25 +99,25 @@ That's all. The template fills in the rest automatically:
 
 > Telegram and provider keys can also be configured from the dashboard after deploy instead of via env.
 
-> **Auth preflight (fail-fast).** If the dashboard is public but you set neither the Basic-Auth pair nor
-> OAuth, the entrypoint exits at boot with the exact variables to set, instead of silently crash-looping
-> against the health check.
+> **Auth preflight (fail-fast).** If the dashboard is public but no complete Basic Auth, Nous OAuth, or
+> self-hosted OIDC provider is configured, the entrypoint exits at boot with the variables to set instead
+> of silently crash-looping against the health check.
 
 ---
 
-## Storage: ephemeral by default, volume optional
+## Storage: persistent volume recommended for production
 
-Free-tier mode runs **without a volume**. Everything under `/data/.hermes` (the official Hermes home
-`~/.hermes`, with `HOME=/data`) — config, credentials, sessions, memories, skills, logs, cron state — is
-recreated on every deploy or container recreate.
+For production, attach a Railway **Volume at `/data`**. Without it, everything under `/data/.hermes`
+(the official Hermes home `~/.hermes`, with `HOME=/data`) — config, sessions, memories, skills, logs and
+cron state — can be lost when Railway replaces the container.
 
 In practice:
 
-- **Secrets belong in Railway variables** (they survive redeploys).
-- **Dashboard-configured state resets on every deploy** (sessions, memories, skills, cron jobs) —
-  the intended free-tier trade-off; the dashboard re-configures quickly.
+- **Secrets belong in Railway variables** (they survive redeploys), not in the image or repository.
+- **A volume is required to preserve agent state** across container recreation; it is not a substitute for backups.
+- Before changing the mount path or deploying an image with different state layout, take a backup of the volume.
 
-To opt into persistence, attach a Railway **Volume at `/data`** — nothing else changes. Note that with
+Attach a Railway **Volume mounted at `/data`** — nothing else changes. Note that with
 a volume attached, config-schema migrations (from `/opt/hermes/scripts/docker_config_migrate.py`) run at
 boot as upstream intends.
 
@@ -122,24 +130,45 @@ deleted.
 
 ---
 
-## Browser automation — off by default
+## Browser automation — preserved by default
 
-`KEEP_BROWSER=0` (default) removes the pinned Chromium (`/opt/hermes/tools/chromium-*`, the browser that
-Hermes' managed tool store ships in v0.21.x), its `agent-browser` pointer file, and the GUI/X11 stack. Rationale: on 0.5 GB the
-gateway (≈200–400 MB under load) + dashboard (≈100–200 MB) already fill the budget; Chromium headless
-adds ≈150–300 MB per page and the free-tier disk quota cannot hold the browser stack. Enable only on a
-≥2 GB plan by building with `KEEP_BROWSER=1`.
+`KEEP_BROWSER=1` (default) retains the pinned Chromium under `/opt/hermes/tools` and its runtime libraries.
+Build with `KEEP_BROWSER=0` only if you explicitly do not need browser-based tools. That reduced image is
+smaller, but browser automation will not work. Browser workloads increase image size, startup I/O and RAM use;
+use a Railway configuration with at least 2 GB RAM as a starting point and size it from observed peak memory.
+Railway Free is limited to 0.5 GB RAM (Trial has 1 GB); both have 1 GB ephemeral storage and a 0.5 GB
+volume allowance. The project’s prior verification recorded about 2.3 GB of reconstructed rootfs for the browser
++ TUI profile (historical measurement, not re-benchmarked in this pass); rootfs size is not the same thing as
+writable-volume capacity. Prefer Hobby or higher for the full-feature production profile. For Free/Trial,
+`KEEP_BROWSER=0` is a deliberate feature compromise, not a guarantee that all resource limits will be sufficient.
+
+## Model Studio — provider setup in the dashboard
+
+The build adds a same-origin **Model Studio** page at `/model-studio` and a **Model Studio** shortcut in the
+stock Hermes dashboard. Use the page header's **Hermes dashboard** link to switch back; both directions go
+through the `/model-studio/switch` handler, so this adds no port or separate server.
+
+Model Studio reads Hermes' installed provider/model catalog at runtime, so its built-in provider list follows
+the pinned Hermes release. Built-in providers use the environment-variable names Hermes declares. Custom
+providers can be created and edited with a display name, model ID, base URL, API mode, and a user-chosen
+`key_env` variable name. Model IDs remain free-form; catalog suggestions do not limit entry.
+
+For either a built-in or custom provider, the primary key is saved through Hermes' credential lifecycle to
+`$HERMES_HOME/.env`. Add as many secondary keys as needed: Hermes' credential-pool API stores those in
+`auth.json` and returns only masked previews to the page. Existing pool entries can be removed; provider
+settings and primary keys can be edited without displaying saved secret values. The page uses Hermes'
+existing authenticated APIs and file-protection routines rather than a second configuration store.
+
+The custom endpoint editor manages named OpenAI-compatible provider entries. It does not make incompatible
+wire protocols interchangeable: select the endpoint's API mode when auto-detection is not appropriate.
+OAuth-only providers still need Hermes' normal OAuth sign-in flow.
 
 ## In-browser Chat tab — on by default
 
-The dashboard's embedded Chat tab (`/chat`, `/api/pty`) — which also powers `hermes --tui` from a shell —
-runs on the Node runtime and the prebuilt TUI bundle. This template **keeps Node and the TUI bundle**
-(`KEEP_TUI=1`), so the Chat tab and `hermes --tui` work, and the install matches its runtime manifest (no
-"install out of sync (node/npm)" warning at startup or in the security audit).
-
-To drop them for a smaller image, build with `KEEP_TUI=0`. The Chat tab then fails *closed* with a clear
-"Chat unavailable" message, `hermes --tui` goes dark, and the out-of-sync warning returns. Browser automation
-(`KEEP_BROWSER`) does **not** require Node, so the two flags are independent.
+The dashboard's embedded Chat tab (`/chat`, `/api/pty`) and `hermes --tui` use Node plus the prebuilt TUI
+bundle. The default (`KEEP_TUI=1`) retains them. Because Node is also used by some integrations/plugins,
+`KEEP_TUI=0` is a deliberate feature-reduction option: the Chat tab and TUI stop working, and Node-dependent
+integrations may fail. Browser automation (`KEEP_BROWSER`) uses a separate build option.
 
 ---
 
@@ -151,9 +180,10 @@ Railway pushes `PORT`; the entrypoint validates it and exports it as `HERMES_DAS
 GET /api/health
 ```
 
-> This is a dashboard-process liveness endpoint. The messaging gateway is supervised independently by
-> s6 and can be down while the container reports healthy — if the dashboard is up but the bot is silent,
-> run `hermes gateway start` from a shell (see Troubleshooting).
+> This is a dashboard-process liveness endpoint, not an end-to-end provider or gateway probe. The gateway is
+> supervised independently by s6 and can be down while the container reports healthy. Railway uses this health
+> check during deployment activation; it does not continuously poll it as an uptime monitor. If a bot is silent,
+> inspect the gateway service/logs (see Troubleshooting).
 
 ---
 
@@ -165,12 +195,12 @@ GET /api/health
   expose version and component health, not secrets. (Verified against v0.21.6.)
 - Dashboard login supports a **pre-hashed password** (`HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH`) — see
   *Credential hygiene* below. Prefer it so the plaintext never enters the container environment.
-- The dashboard file browser opens at `/data` (the runtime `HOME`), where `.hermes` is the Hermes home. It can
-  move freely through the directories it can read (`HERMES_DASHBOARD_FILES_ROOT` is intentionally unset in the
-  Dockerfile; set it to lock the browser to one folder).
-  The file browser and spot editor deny `/proc`, `/run`, and any `.dash` folder (sensitive-path guard). So dashboard-UI
-  access cannot read `/proc/<pid>/environ`, the Railway secrets in `/run/s6/container_environment`, or the dashboard
-  session-signing secret in `/data/.hermes/.dash/`. The agent's own tools are confined to `/data` (`HERMES_WRITE_SAFE_ROOT`).
+- The dashboard file browser is restricted to `/data` (`HERMES_DASHBOARD_FILES_ROOT=/data`), which contains agent state
+  but not the container's `/etc` and `/opt` trees. The file browser and spot editor also deny `/proc`, `/run`, and any
+  `.dash` folder (sensitive-path guard). Dashboard-UI access therefore cannot read `/proc/<pid>/environ`, Railway secrets
+  under `/run/s6/container_environment`, or the dashboard session-signing secret in `/data/.hermes/.dash/`. The agent's
+  own tools are configured to write within `/data` (`HERMES_WRITE_SAFE_ROOT`); this is not a sandbox from the agent's own
+  process environment or other files its UID can read.
 - The build upgrades the frozen dependency set's vulnerable packages to fixed releases, each pinned by
   SHA-256 and checked after the swap: `httpx2` 2.7.0→2.12.0, `httpcore2` 2.7.0→2.12.0, `PyJWT` 2.13.0→2.15.1,
   `tornado` 6.5.8→6.5.10, `urllib3` 2.7.0→2.8.0, `multidict` 6.7.1→6.9.1, `oauthlib` 3.3.1→4.0.0. Tornado and
@@ -180,9 +210,14 @@ GET /api/health
 - The swapped `PyJWT` (2.15.1) and `oauthlib` (4.0.0) are newer than upstream's pins (`PyJWT==2.13.0` in
   `pyproject.toml`). Upstream's package metadata therefore still declares 2.13.0 for PyJWT. This does not affect
   startup or the security audit, which report clean.
-- Keep all credentials in Railway **secret** variables. The boot hook seeds `$HERMES_HOME/.env` with
-  mode `0600`.
+- Keep all credentials in Railway **secret** variables. The upstream boot hook seeds `$HERMES_HOME/.env` with
+  mode `0600`. The image follows upstream's sealed-container model (`HERMES_DISABLE_LAZY_INSTALLS=1`): dependency
+  installs are not performed on demand into the immutable `/opt/hermes` tree. Optional integrations/tools whose Python
+  packages are not part of the pinned upstream image's production extras must be added and tested at build time.
 - The image base is pinned by digest (tag + `@sha256:…`) for reproducible builds.
+- The container's PID 1 starts as root because upstream s6 initialization performs volume ownership/UID setup;
+  the gateway/dashboard services drop to the configured `hermes` runtime identity. Do not add `USER hermes`
+  without redesigning and testing the upstream initialization contract.
 
 ### Credential hygiene
 
@@ -243,12 +278,72 @@ restarting the container.
 
 ---
 
+
+---
+
+## Production deployment checklist
+
+### Environment-variable checklist
+
+- [ ] **Dashboard authentication:** configure one supported provider. For public-internet access, prefer
+      `HERMES_DASHBOARD_OAUTH_CLIENT_ID` (Nous OAuth) or both `HERMES_DASHBOARD_OIDC_ISSUER` and
+      `HERMES_DASHBOARD_OIDC_CLIENT_ID` (self-hosted OIDC). Use `ADMIN_USERNAME` + `ADMIN_PASSWORD` for
+      Basic Auth only behind a trusted access layer; store the password as a Railway secret.
+- [ ] **Model provider:** configure credentials for the provider selected in Hermes (for example
+      `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, or provider-specific
+      cloud credentials), or finish setup through the authenticated dashboard.
+- [ ] **Messaging adapter:** configure its credentials and access controls (for Telegram, normally
+      `TELEGRAM_BOT_TOKEN` and optionally `TELEGRAM_ALLOWED_USERS`). Set only adapters you intend to run.
+- [ ] **Persistence:** attach a Railway Volume at `/data`. Do not try to set `RAILWAY_VOLUME_MOUNT_PATH`
+      yourself; Railway supplies it when the volume is attached.
+- [ ] **Port:** leave Railway's injected `PORT` variable alone. The entrypoint maps it to Hermes.
+- [ ] **No secrets in source:** check that API keys, bot tokens, passwords, and exported `.env` files are
+      absent from the repository and Docker build context before deployment.
+
+1. **Pin the source revision.** Deploy from a reviewed Git commit; the base Hermes image is already pinned by release tag and digest.
+2. **Attach a Railway Volume at `/data` before first production use.** Do not change this mount casually; both `HOME` and `HERMES_HOME` are rooted there.
+3. **Set dashboard credentials as Railway secrets.** Use `ADMIN_USERNAME` and `ADMIN_PASSWORD`, or the canonical `HERMES_DASHBOARD_BASIC_AUTH_*` variables. Do not enable insecure/public unauthenticated access.
+4. **Configure your adapter and model-provider credentials.** Examples include `TELEGRAM_BOT_TOKEN`, `DISCORD_BOT_TOKEN`, provider API keys and any adapter-specific variables you actually need. Do not commit `.env` files.
+5. **Start with suitable resources.** With browser automation enabled, allocate at least 2 GB RAM as an initial target and watch peak memory, restarts, latency and volume usage. A full-feature build is not a good fit for a 0.5 GB memory budget.
+6. **Keep the health check** at `GET /api/health` on Railway's injected `PORT`. Verify gateway delivery separately after deploy; a dashboard 200 is not proof that Telegram or another adapter is connected.
+7. **Back up before upgrades.** A deploy rollback restores the old image but does not automatically roll back data/schema migrations in the volume.
+
+### Build profiles
+
+The default build is feature-preserving:
+
+```sh
+docker build -t hermes-lite:local .
+```
+
+Optional reduced-feature profile (removes Chromium/browser automation):
+
+```sh
+docker build --build-arg KEEP_BROWSER=0 -t hermes-lite:no-browser .
+```
+
+Optional reduced-feature profile (removes Node/TUI; may break Node-dependent integrations):
+
+```sh
+docker build --build-arg KEEP_TUI=0 -t hermes-lite:no-tui .
+```
+
+These flags reduce components intentionally; do not use them if the corresponding feature is required. Local builds require Docker BuildKit/buildx and network access to the pinned base image and hash-verified dependency wheels. Run `./validate-template.sh` for fast shell/config/preflight checks before building.
+
+### Deploy, verify, and roll back
+
+- **Deploy:** push the reviewed commit to the Git branch connected to Railway and let Railway build the Dockerfile. Keep the service start-command override unset so the Docker `ENTRYPOINT`/`CMD` and s6 dispatcher are used.
+- **Verify:** inspect build logs for all `prune verify` checks; wait for Railway's `/api/health` check; log into the dashboard; run Hermes Doctor/security audit; test one real model request and one message round-trip on every configured adapter; confirm the `/data` volume remains mounted.
+- **Rollback:** use Railway's Deployments view to redeploy the last known-good deployment/image. Do not detach, wipe, or remount the `/data` volume as part of image rollback. If the failed release ran a config/schema migration, restore a compatible volume backup only after determining whether the migration was backward-compatible.
+- **Validate before production:** test the same image and a copy of representative state in a staging service. A successful Docker build alone does not validate provider credentials, Railway volume behavior, Telegram polling or third-party integrations.
+
 ## Troubleshooting
 
 **Container restart-looping**
-Check logs for the `[railway-entrypoint] PORT=… auth_provider=…` banner. Dying before it → image/cold-start
-issue. Seeing the auth error → set the Basic Auth variables. Otherwise check memory usage against the
-0.5 GB cap — repeated OOM kills are the classic free-tier loop.
+Check logs for the `[railway-entrypoint] PORT=… auth_provider=…` banner. Dying before it suggests an
+image/cold-start issue. Seeing the auth error means dashboard credentials/provider configuration is missing.
+Otherwise inspect Railway memory metrics and OOM events; full browser-enabled workloads need more headroom
+than a 0.5 GB instance provides.
 
 **Dashboard up, but the bot is dark**
 The `gateway-default` s6 slot can enter permanent-failure. From a shell run `hermes gateway start`
@@ -283,9 +378,7 @@ caused the warning in the dashboard. If the `hermes`-user doctor run also report
 "Dashboard up, but the bot is dark" above.
 
 **Free-tier reality check**
-Budget honestly: 0.5 GB RAM is shared by gateway + dashboard + the bot's work. Reduce concurrent load
-(fewer platforms/cron jobs/heavy skills) first; move to a paid plan for real headroom. Nothing in the
-template can buy RAM back.
+Free/Trial resource limits are tight for this container: Free has 0.5 GB RAM, Trial has 1 GB RAM, and both have 1 GB ephemeral storage plus a 0.5 GB volume allowance. Prefer Hobby or higher with at least 2 GB RAM and sufficient volume capacity as an initial production target. If you must experiment on Free/Trial, reduce concurrent work, monitor the actual metrics, and use `KEEP_BROWSER=0` only if you accept losing browser automation; that switch does not guarantee the whole deployment fits every plan limit.
 
 **Idle CPU**
 The deployed service performs no template-owned background work. Upstream, the gateway runs a 60 s cron
@@ -307,9 +400,10 @@ Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned b
    `prune.sh`. The version gate reads `/opt/hermes/install-stamp.json` (`displayVersion`/`baseVersion`); the
    `pyproject.toml` and `image-provenance.json` values are `0.0.0` placeholders in v0.21.x images.
 3. Re-verify the anchored patches in `prune.sh` against the new image. Each one exits non-zero if its upstream
-   line drifted: the `whatsapp_cloud` entry in `gateway/run.py`, the `/proc` guard in
-   `hermes_cli/web_routers/files.py`, the `HOME=/opt/data` / `cd /opt/data` lines in `dashboard/run` and
-   `main-wrapper.sh` (patched to `HOME=/data` / `cd /data`).
+   line drifted: the runtime-command launcher in `hermes_cli/terminal/_launchers.py`, the sensitive-path guard
+   in `hermes_cli/web_routers/files.py`, and the `HOME=/opt/data` / `cd /opt/data` defaults in the dashboard,
+   launcher, and stage-2 scripts (patched to the `/data` layout). Platform adapters are retained; they are no
+   longer edited out of `gateway/run.py`.
 4. Check the managed tool-store paths (`/opt/hermes/tools/chromium-*`, `node-*`, `npm-*`, `ffmpeg-*`,
    `python-*`, `ripgrep-*`) and `/etc/hermes/agent-browser-executable-path` still match the prune rules.
 5. Reconcile the venv security block: if the new release already ships fixed `httpx2`/`httpcore2`, the block
@@ -322,12 +416,15 @@ Use **version tags** (e.g. `v0.21.6`), never date tags. Each release is pinned b
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; `KEEP_BROWSER`/`KEEP_TUI` build-args; Railway runtime env. |
-| `prune.sh` | Removes build-only + out-of-scope content, sets `HOME` to `/data` (`~/.hermes` = `/data/.hermes`), upgrades the vulnerable venv packages, verifies the pruned runtime (version gate, imports, TUI bundle, dashboard smoke test, `ldd` sweep, clean `/data`). |
+| `Dockerfile` | Pins Hermes by digest; two-stage prune/flatten build; preserves browser/TUI by default; installs the same-origin Model Studio page and router; Railway runtime env. |
+| `prune.sh` | Removes build-only content, preserves supported platform adapters, aligns `HOME` to `/data`, upgrades selected pinned dependencies, mounts Model Studio and its dashboard switch link, and verifies runtime assets, optional browser/TUI, dashboard startup and shared-library integrity. |
+| `hermes_lite_model_studio.py` | Serves `/model-studio`, implements the UI-switch handler, returns a secret-free settings snapshot, and saves named providers with an editable `key_env`. |
+| `model-studio.html` | Self-contained provider/model editor. Uses Hermes APIs for provider discovery, `.env` credentials and unlimited secondary `auth.json` credential-pool keys. |
 | `railway-entrypoint.sh` | Validates `PORT`, routes `ADMIN_USERNAME`/`ADMIN_PASSWORD` aliases, auto-generates the session secret, preflights dashboard auth (fail-fast), creates the `~/.local/bin/hermes` launcher (`hermes doctor` check), logs a boot banner, delegates to Hermes' dispatcher. |
 | `railway.json` | Railway health check (`/api/health`) + restart policy (`ON_FAILURE`, ≤5 retries). |
 | `CHANGELOG.md` | What changed in each pin bump (v0.21.3 → v0.21.6), and how it was verified. |
-| `README.md` | This guide. |
+| `validate-template.sh` | Fast shell, Railway JSON, feature-default, `PORT`, and auth-preflight regression checks without Docker. |
+| `README.md` | Deployment guide, environment checklist, troubleshooting, and update procedure. |
 
 ---
 

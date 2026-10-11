@@ -7,11 +7,9 @@
 #   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
 #   $2 = KEEP_TUI    (1 = keep Node + the dashboard Chat tab TUI, 0 = remove)
 #
-# Both default to removing: the template targets the Telegram-only Railway free
-# tier, matching the Dockerfile's ARG KEEP_BROWSER=0 / ARG KEEP_TUI=0. Callers
-# who pass $1/$2 explicitly override this. The TUI is the dashboard Chat tab's
-# runtime (node + prebuilt bundle); stripping it is the default and turns the
-# tab off (fails closed). Set KEEP_TUI=1 to keep the Chat tab / `hermes --tui`.
+# Defaults preserve the feature set (KEEP_BROWSER=1, KEEP_TUI=1), matching the
+# Dockerfile. Pass 0 only when accepting the corresponding feature loss. KEEP_TUI
+# also controls Node/npm, which some platform plugins may require.
 #
 # The image is pinned to a released Hermes version in Dockerfile. Keep the
 # hard-coded pruning rules aligned with that pinned release and update the
@@ -21,7 +19,7 @@ set -eu
 # Never leave bytecode behind, including from the verification imports below.
 export PYTHONDONTWRITEBYTECODE=1
 
-KEEP_BROWSER="${1:-0}"
+KEEP_BROWSER="${1:-1}"
 case "$KEEP_BROWSER" in
     0|1) ;;
     *)
@@ -30,7 +28,7 @@ case "$KEEP_BROWSER" in
         ;;
 esac
 
-KEEP_TUI="${2:-0}"
+KEEP_TUI="${2:-1}"
 case "$KEEP_TUI" in
     0|1) ;;
     *)
@@ -104,20 +102,12 @@ rm_group "ui-tui TS source" \
     /opt/hermes/ui-tui/vitest.config.ts \
     /opt/hermes/ui-tui/eslint.config.mjs
 
-# --- In-browser Chat tab runtime (KEEP_TUI; removed by default) ------------
-# The dashboard Chat tab is the only runtime consumer of Node in a
-# Telegram-only deployment (verified: gateway/platforms/*, boot hooks
-# docker/stage2-hook.sh, cont-init.d and s6-rc.d have no node/npm usage; the
-# WhatsApp/photon adapters that also used node are already removed above).
-# With KEEP_TUI=0 (the default) we drop node itself and the bundled TUI it
-# runs. The Python launch plumbing is DELIBERATELY KEPT: web_server.py and
-# web_routers/audio.py import web_server_chat at module level, so deleting
-# those modules would crash the dashboard at boot. Instead, with node gone the
-# Chat tab launcher hits upstream's own designed degradation — _tui_node_bin()
-# exits 1 and chat_ws catches the SystemExit and closes the WS with a clear
-# reason — so the tab fails closed rather than breaking the dashboard.
-# `hermes --tui` also goes dark (opt-out semantics). Browsers (KEEP_BROWSER)
-# do not need node.
+# --- In-browser Chat tab / Node runtime (KEEP_TUI) -------------------------
+# KEEP_TUI=0 is an explicit reduced-feature option. It removes Node/npm and the
+# bundled TUI. The Chat tab and `hermes --tui` then fail closed. Because Node is
+# also used by some integrations/plugins, use KEEP_TUI=0 only after validating
+# the exact feature set required by your deployment. Browser automation has its
+# own independent KEEP_BROWSER switch.
 if [ "$KEEP_TUI" = "0" ]; then
     # v0.21.x keeps node/npm in the managed tool store; /usr/local/bin/{node,npm,npx}
     # are symlinks into it, so remove both the links and the store trees.
@@ -166,67 +156,11 @@ rm_group "sanitizer runtimes (dev-only)" \
     /usr/lib/*-linux-gnu/libhwasan.so* /usr/lib/*-linux-gnu/liblsan.so* \
     /usr/lib/*-linux-gnu/libubsan.so*
 
-# --- Out-of-scope messaging platforms (Telegram is the only target) --------
-# The user removed WhatsApp + iMessage/Photon from scope. This template must
-# stay a Telegram+dashboard deployment. Below we delete only what has been
-# dependency-traced against the pinned release:
-#
-#   plugins/platforms/whatsapp/   directory plugin (Baileys node bridge):
-#                                discovered via plugins/platforms/* plugin.yaml
-#                                scan — no Python module imports it; removing
-#                                the dir removes it from discovery.
-#   plugins/platforms/photon/    directory plugin (iMessage via Spectrum
-#                                sidecar); same discovery mechanism, no imports.
-#   plugins/platforms/photon/sidecar/node_modules/
-#                                build-time-baked sidecar deps (macOS/Linux
-#                                node sidecar we do not run).
-#   scripts/whatsapp-bridge/     bridge.js + manifest, mirrored into
-#                                HERMES_HOME at runtime. With the plugin gone
-#                                it is dead weight (also covered by the
-#                                scripts/ sweep further down in this file —
-#                                kept here explicit for clarity).
-#   gateway/platforms/whatsapp_common.py + whatsapp_cloud.py
-#                                Builtin modules. whatsapp_cloud is wired into
-#                                gateway/run.py:_BUILTIN_ADAPTERS (a module
-#                                removed never breaks startup: dispatch is
-#                                lazy + adapter-creation failures degrade to
-#                                "No adapter" logs), BUT an operator could
-#                                still enable whatsapp_cloud in config.yaml,
-#                                and the lazy import_module() would raise
-#                                ModuleNotFoundError out of _instantiate_*.
-#                                We DEFUSE that upstream line in-place below,
-#                                mirroring the exact v0.21.6 text so nothing
-#                                else changes. Keeping whatsapp_common would
-#                                pull WhatsAppBehaviorMixin runtime deps; it is
-#                                only referenced by the two removed modules &
-#                                the whatsapp plugin (all gone or defused).
-#
-# We do NOT touch the CLI surface (hermes_cli/subcommands/whatsapp.py, the
-# dashboard messaging routes). They keep working but only import the removed
-# core modules lazily, inside function bodies, so a shell invocation cannot
-# import-crash. Erasing them would be a deeper upstream patch with zero
-# runtime benefit (they are already dead code at rest).
-rm_group "whatsapp platform plugin"   /opt/hermes/plugins/platforms/whatsapp
-rm_group "photon/iMessage plugin"     /opt/hermes/plugins/platforms/photon
-rm_group "whatsapp bridge scripts"    /opt/hermes/scripts/whatsapp-bridge
-rm_group "whatsapp core modules"      \
-    /opt/hermes/gateway/platforms/whatsapp_common.py \
-    /opt/hermes/gateway/platforms/whatsapp_cloud.py
-
-# Defuse the upstream builtin-adapter entry for the removed whatsapp_cloud
-# module so an operator who enables `platforms.whatsapp_cloud` in config.yaml
-# can never crash-loop the gateway on a missing module import. The upstream
-# entry is a TWO-LINE statement (key + message continuation): delete both
-# lines together. Anchor on the exact upstream text so a version bump fails
-# the build instead of drifting.
-_runpy=/opt/hermes/gateway/run.py
-grep -qF 'Platform.WHATSAPP_CLOUD: ("whatsapp_cloud", "WhatsAppCloudAdapter", "check_whatsapp_cloud_requirements",' "$_runpy" || {
-    echo 'ERROR: whatsapp_cloud builtin-adapter line not found in gateway/run.py — update this patch for the pinned Hermes release' >&2
-    exit 1
-}
-# N joins the following continuation line into the pattern space; d deletes both.
-sed -i '/^    Platform\.WHATSAPP_CLOUD:/{N;d;}' "$_runpy"
-echo "  defused: whatsapp_cloud builtin-adapter entry removed from gateway/run.py"
+# --- Platform/integration preservation --------------------------------------
+# Deliberately do not remove messaging-platform plugins, adapters, bridge
+# scripts, or their sidecar dependencies here. Hermes' supported integration
+# surface is part of the default image contract. Reduce the set only via an
+# explicit, separately tested build profile—not by silently pruning adapters.
 
 # --- Build-time toolchain --------------------------------------------------
 # Native extensions are already built into the upstream venv, and the compiler
@@ -291,13 +225,15 @@ rm_group "dev-only trees" \
 # scripts/docker_rebootstrap_nous_session.py (HERMES_AUTH_JSON_REBOOTSTRAP).
 # Deleting scripts/ wholesale silently disables config migrations on
 # volume-backed upgrades and prints a boot warning every start. Preserve just
-# those two (both stdlib-only, no intra-scripts imports); delete the rest
-# (CI/release/dev tooling, the WhatsApp bridge, installer shims).
+# those two (both stdlib-only, no intra-scripts imports); retain the WhatsApp
+# bridge directory because the platform plugin may dispatch to it at runtime.
+# Delete only the remaining dev/CI/release scripts and installer shims.
 find /opt/hermes/scripts -mindepth 1 -maxdepth 1 \
     ! -name 'docker_config_migrate.py' \
     ! -name 'docker_rebootstrap_nous_session.py' \
+    ! -name 'whatsapp-bridge' \
     -exec rm -rf {} + 2>/dev/null || true
-echo "  pruned: dev-only scripts (kept stage2 utils: docker_config_migrate.py, docker_rebootstrap_nous_session.py)"
+echo "  pruned: dev-only scripts (kept stage2 utils and whatsapp-bridge)"
 
 # --- OS noise --------------------------------------------------------------
 rm_group "apt lists"             /var/lib/apt/lists
@@ -309,8 +245,8 @@ rm_group "dev/CI leftovers" \
     /opt/hermes/flake.lock /opt/hermes/eslint.config.shared.mjs
 
 # --- Browser automation ---------------------------------------------------
-# Disabled by default in the optimized $5 tier template (Telegram+Dashboard).
-# Set KEEP_BROWSER=1 only if browser automation is required.
+# Preserved by default. Set KEEP_BROWSER=0 only when browser tools are not
+# required and the smaller image/resource footprint is more important.
 if [ "$KEEP_BROWSER" = "1" ]; then
     echo "  KEPT: browser automation (KEEP_BROWSER=1)"
 else
@@ -387,6 +323,22 @@ if [ "$KEEP_BROWSER" = "0" ]; then
             exit 1
         fi
     done
+else
+    browser_pointer=/etc/hermes/agent-browser-executable-path
+    if [ ! -s "$browser_pointer" ]; then
+        echo "ERROR: KEEP_BROWSER=1 but $browser_pointer is missing or empty" >&2
+        exit 1
+    fi
+    browser_bin=$(cat "$browser_pointer")
+    if [ ! -x "$browser_bin" ]; then
+        echo "ERROR: browser pointer does not resolve to an executable: $browser_bin" >&2
+        exit 1
+    fi
+    browser_version=$("$browser_bin" --version 2>&1) || {
+        echo "ERROR: bundled Chromium failed its --version probe: $browser_version" >&2
+        exit 1
+    }
+    echo "prune verify: browser executable OK ($browser_version)"
 fi
 
 # --- Shared-library integrity sweep -----------------------------------------
@@ -508,6 +460,46 @@ for f in /opt/hermes/bin/hermes /opt/hermes/docker/hermes-exec-shim.sh /opt/herm
 done
 echo "  patched: shim HOME, gateway s6 script renderer, HERMES_HOME fallbacks (no runnable /opt/data left)"
 
+# --- Hermes-lite Model Studio: same-origin page + dashboard switch ----------
+# The provider editor reuses Hermes' authenticated config/env/credential-pool
+# APIs. Mount its small route before the SPA catch-all, and add a link in the
+# stock dashboard so users can switch between the two UIs without another port.
+/opt/hermes/.venv/bin/python3 - <<'PY'
+from pathlib import Path
+import re
+
+server = Path("/opt/hermes/hermes_cli/web_server.py")
+src = server.read_text(encoding="utf-8")
+import_anchor = "    shared_metrics as _shared_metrics_routes,\n)"
+include_anchor = "app.include_router(_shared_metrics_routes.router)\n"
+if src.count(import_anchor) != 1 or src.count(include_anchor) != 1:
+    raise SystemExit("ERROR: Hermes web_server route-mount anchors drifted; update Model Studio integration")
+src = src.replace(import_anchor,
+                  "    shared_metrics as _shared_metrics_routes,\n"
+                  "    hermes_lite_model_studio as _hermes_lite_model_studio_routes,\n)", 1)
+src = src.replace(include_anchor,
+                  include_anchor + "app.include_router(_hermes_lite_model_studio_routes.router)\n", 1)
+server.write_text(src, encoding="utf-8")
+
+page = Path("/opt/hermes/hermes_cli/web_dist/model-studio.html")
+if not page.is_file():
+    raise SystemExit("ERROR: Model Studio HTML was not copied into the Hermes web_dist directory")
+index = Path("/opt/hermes/hermes_cli/web_dist/index.html")
+if not index.is_file():
+    raise SystemExit("ERROR: upstream dashboard web_dist/index.html is missing")
+html = index.read_text(encoding="utf-8")
+marker = "<!-- hermes-lite-model-studio-link -->"
+if marker not in html:
+    if len(re.findall(r"</body>", html, flags=re.IGNORECASE)) != 1:
+        raise SystemExit("ERROR: expected exactly one </body> in Hermes dashboard index.html")
+    link = '''\n<!-- hermes-lite-model-studio-link -->\n<style>#hermes-lite-model-studio-link{position:fixed;z-index:2147483000;right:18px;top:76px;display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid #d8a64f;border-radius:11px;background:#1b1d20;color:#f5d38d;font:650 13px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 6px 22px #0006}#hermes-lite-model-studio-link:hover{background:#2b261d;border-color:#f0c978;transform:translateY(-1px)}@media(max-width:600px){#hermes-lite-model-studio-link{top:68px;right:10px;padding:8px 10px;font-size:12px}}</style>\n<a id="hermes-lite-model-studio-link" href="/model-studio/switch?dashboard=studio" aria-label="Open Hermes Model Studio">✦ Model Studio</a>\n'''
+    html = re.sub(r"</body>", link + "</body>", html, count=1, flags=re.IGNORECASE)
+    index.write_text(html, encoding="utf-8")
+print("  mounted: /model-studio page + dashboard switch handler and stock-dashboard link")
+PY
+
+echo "prune verify: Model Studio route, static page, and dashboard-switch link installed"
+
 # --- /opt/data -> /data compatibility symlink -------------------------------
 # The sed patch above only covers STATIC image files. Upstream also renders
 # per-profile gateway s6 scripts at RUNTIME (hermes_cli/service_manager.py
@@ -596,10 +588,10 @@ echo "  verified: dashboard child launch path boots ($LAUNCH_OUT)"
 # The dashboard file browser (/api/files/*) and spot editor (/api/fs/*) gate
 # listings and reads through hermes_cli/web_routers/files.py::_is_sensitive_path.
 # Upstream denies credential basenames (.env, auth.json, config.yaml, ...) and
-# the mcp-tokens/ and pairing/ trees, but not the paths below. This template
-# leaves HERMES_DASHBOARD_FILES_ROOT unset, so the browser is unlocked: it opens
-# at $HOME (/data) and can go up to /; the Hermes home /data/.hermes is one
-# click in. The guard is therefore extended to:
+# the mcp-tokens/ and pairing/ trees, but not the paths below. The runtime
+# confines HERMES_DASHBOARD_FILES_ROOT to /data; the guard still protects against
+# direct/malformed paths and defense-in-depth if the root is changed later.
+# The guard is therefore extended to:
 #   /proc  (absolute root)  /proc/<pid>/environ exposes every container secret
 #                           (Telegram token, model keys, dashboard password).
 #   /run   (absolute root)  s6-overlay writes each container env var to
@@ -846,9 +838,23 @@ if os.environ.get("KEEP_TUI") == "1":
         "/opt/hermes/ui-tui/package.json",
     ]
 missing = [p for p in must if not pathlib.Path(p).exists()]
+# These are intentionally retained production integrations, not optional debris.
+for required_dir in (
+    "/opt/hermes/plugins/platforms/whatsapp",
+    "/opt/hermes/plugins/platforms/photon",
+):
+    if not pathlib.Path(required_dir).is_dir():
+        missing.append(required_dir)
+for required_file in (
+    "/opt/hermes/gateway/platforms/whatsapp_common.py",
+    "/opt/hermes/gateway/platforms/whatsapp_cloud.py",
+    "/opt/hermes/scripts/whatsapp-bridge",
+):
+    if not pathlib.Path(required_file).exists():
+        missing.append(required_file)
 if missing:
     sys.exit("prune broke the image, missing: " + ", ".join(missing))
-print("prune verify: imports OK, runtime assets present")
+print("prune verify: imports, runtime assets, and retained platform integrations present")
 PY
 
 # The dashboard Chat tab spawns the prebuilt TUI bundle. Prove the bundle is
