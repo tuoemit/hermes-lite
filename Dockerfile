@@ -46,7 +46,7 @@ ARG KEEP_TUI=1
 # ffmpeg/ffprobe (~279 MB): voice-note transcription, TTS delivery and media
 # transcoding on the channels. KEEP_MEDIA=0 keeps channels fully usable for
 # text and file attachments but drops server-side audio/video processing.
-ARG KEEP_MEDIA=0
+ARG KEEP_MEDIA=1
 
 # Google dependency stack (~140 MB: googleapiclient, google-auth, grpcio,
 # protobuf, ...). KEEP_GOOGLE=0 disables the Google Chat / Gmail / Workspace

@@ -63,7 +63,7 @@ default route.
 |---|---|---|
 | `KEEP_BROWSER` | `0` | Chromium + GUI/GL/font deps (~515 MB) — browser automation unavailable |
 | `KEEP_TUI` | `1` | Node + Chat tab/TUI; Node-dependent plugins may fail |
-| `KEEP_MEDIA` | `0` | ffmpeg/ffprobe (~279 MB) — voice notes not transcribed, TTS audio not rendered |
+| `KEEP_MEDIA` | `1` | ffmpeg/ffprobe (~279 MB) — voice notes not transcribed, TTS audio not rendered |
 | `KEEP_GOOGLE` | `0` | Google stack (~140 MB) — Google Chat/Gmail/Workspace integrations, Vertex AI routes |
 | `KEEP_PHOTON` | `0` | Photon sidecar (~114 MB) |
 | `KEEP_CHANNELS` | `"discord telegram"` | All unlisted adapters + their venv deps; `"all"` keeps the upstream set |
