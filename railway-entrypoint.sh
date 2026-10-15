@@ -259,7 +259,7 @@ if [ "$oidc_ok" = 1 ]; then
 fi
 [ -n "$auth_label" ] || auth_label="none"
 browser_label="off"
-# v0.21.x: the pinned Chromium lives in the managed tool store (not /opt/hermes/.playwright).
+# v0.21.x+: the pinned Chromium lives in the managed tool store (not /opt/hermes/.playwright).
 for _chromium in /opt/hermes/tools/chromium-* /opt/hermes/.playwright; do
     [ -e "$_chromium" ] && browser_label="on"
 done

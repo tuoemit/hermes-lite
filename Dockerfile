@@ -8,10 +8,10 @@
 # the remaining rootfs into a fresh image so the removed bytes do not remain in
 # parent layers.
 #
-# Pinned: nousresearch/hermes-agent:v0.21.6 (multi-arch index digest below).
+# Pinned: nousresearch/hermes-agent:v0.22.1 (multi-arch index digest below).
 # ============================================================================
 
-ARG HERMES_IMAGE=nousresearch/hermes-agent:v0.21.6@sha256:55e192fba0cd4fde61142abbff5adeacff40efdb482ccd0ff877924bd274f909
+ARG HERMES_IMAGE=nousresearch/hermes-agent:v0.22.1@sha256:861c9756ed6c558530c73d5c27860343b00c0d5efd6997a1d8ec6416c8a2b485
 
 # ---------------------------------------------------------------------------
 # Stage 1 — prune the official Hermes image.
@@ -23,24 +23,54 @@ USER root
 # release required to avoid the SQLite WAL-reset corruption bug. Hermes runs on
 # its managed Python (/usr/local/bin/python3 -> /opt/hermes/tools/python-*), which
 # bundles its own SQLite, so this checks the interpreter Hermes actually uses.
+# (v0.22.1 ships SQLite 3.53.1; the gate needs >= 3.51.3.)
 RUN python3 -c 'import sqlite3, sys; v=sqlite3.sqlite_version_info; print("SQLite", sqlite3.sqlite_version); sys.exit("ERROR: SQLite WAL-reset fix missing; need >= 3.51.3") if v < (3,51,3) else None'
 
-# Preserve the upstream browser toolchain by default. Set KEEP_BROWSER=0 only
-# when you explicitly accept losing browser automation to reduce image/disk/RAM use.
-# Full browser workloads should be deployed with adequate RAM (start at >= 2 GB).
-ARG KEEP_BROWSER=1
+# --- Build profile switches -------------------------------------------------
+# This template's default profile is slim: no browser, no server-side media
+# processing, no Google stack, no Photon sidecar, and only the Discord +
+# Telegram messaging channels. Every switch below is a documented feature
+# trade, not a silent removal; flip the ARGs (or override at build time with
+# --build-arg) to restore upstream behavior.
 
-# Preserve Node and the prebuilt TUI by default. Node may also be required by
+# Browser automation (Chromium + its GUI/GL/font dependencies, ~515 MB with
+# KEEP_BROWSER=0). Full browser workloads should be deployed with adequate
+# RAM (start at >= 2 GB) when re-enabled.
+ARG KEEP_BROWSER=0
+
+# Node + the prebuilt TUI (dashboard Chat tab). Node may also be required by
 # platform/plugin bridges, so KEEP_TUI=0 is a deliberate feature-reduction mode,
 # not a generic production optimization.
 ARG KEEP_TUI=1
 
+# ffmpeg/ffprobe (~279 MB): voice-note transcription, TTS delivery and media
+# transcoding on the channels. KEEP_MEDIA=0 keeps channels fully usable for
+# text and file attachments but drops server-side audio/video processing.
+ARG KEEP_MEDIA=0
+
+# Google dependency stack (~140 MB: googleapiclient, google-auth, grpcio,
+# protobuf, ...). KEEP_GOOGLE=0 disables the Google Chat / Gmail / Workspace
+# integrations and the native Vertex/Gemini routes. The build fails fast if
+# KEEP_CHANNELS still includes google_chat.
+ARG KEEP_GOOGLE=0
+
+# Photon sidecar (~114 MB), the WhatsApp-adjacent hosted channel. It survives
+# only when KEEP_PHOTON=1 AND photon is listed in KEEP_CHANNELS.
+ARG KEEP_PHOTON=0
+
+# Messaging channels to keep: space-separated plugin ids under
+# /opt/hermes/plugins/platforms, or "all" for the complete upstream channel
+# set. Unselected adapters, their gateway-side files and their channel-only
+# venv dependencies are pruned (the gateway lazy-imports adapters only when a
+# platform is actually configured).
+ARG KEEP_CHANNELS="discord telegram"
+
 COPY --chmod=0755 prune.sh /prune.sh
 # Hermes-lite LLMs Studio is mounted as a small same-origin page/router inside
 # Hermes' existing authenticated dashboard; it does not add a service or port.
-COPY --chmod=0644 hermes_lite_model_studio.py /opt/hermes/hermes_cli/web_routers/hermes_lite_model_studio.py
-COPY --chmod=0644 model-studio.html /opt/hermes/hermes_cli/web_dist/model-studio.html
-RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" && rm -f /prune.sh
+COPY --chmod=0644 LLM_studio.py /opt/hermes/hermes_cli/web_routers/LLM_studio.py
+COPY --chmod=0644 LLM-studio.html /opt/hermes/hermes_cli/web_dist/LLM-studio.html
+RUN /prune.sh "${KEEP_BROWSER}" "${KEEP_TUI}" "${KEEP_MEDIA}" "${KEEP_GOOGLE}" "${KEEP_PHOTON}" "${KEEP_CHANNELS}" && rm -f /prune.sh
 
 # ---------------------------------------------------------------------------
 # Stage 2 — flatten the pruned tree into a fresh image.
@@ -49,7 +79,7 @@ FROM scratch AS runtime
 COPY --from=pruned / /
 
 # --- Hermes runtime environment -------------------------------------------
-# Mirrors the upstream v0.21.6 image environment where it matters, with the
+# Mirrors the upstream v0.22.1 image environment where it matters, with the
 # template's /data layout on top.
 #
 # HERMES_RUNTIME_DIR (/opt/hermes/tools) is the managed tool store (managed

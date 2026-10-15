@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 router = APIRouter()
-_PAGE = Path(__file__).resolve().parent.parent / "web_dist" / "model-studio.html"
+_PAGE = Path(__file__).resolve().parent.parent / "web_dist" / "LLM-studio.html"
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -32,8 +32,8 @@ class CustomEndpointPayload(BaseModel):
     clear_key: bool = False
 
 
-@router.get("/model-studio", response_class=HTMLResponse, include_in_schema=False)
-def model_studio_page():
+@router.get("/LLM-studio", response_class=HTMLResponse, include_in_schema=False)
+def llm_studio_page():
     """Serve the standalone provider editor inside Hermes' existing auth boundary."""
     if not _PAGE.is_file():
         raise HTTPException(status_code=404, detail="LLMs Studio page is missing")
@@ -50,18 +50,18 @@ def model_studio_page():
     return HTMLResponse(source, headers={"Cache-Control": "no-store"})
 
 
-@router.get("/model-studio/switch", include_in_schema=False)
+@router.get("/LLM-studio/switch", include_in_schema=False)
 def switch_dashboard(dashboard: str = "studio"):
     """Dashboard switch handler: move between LLMs Studio and upstream Hermes UI."""
     if dashboard == "studio":
-        return RedirectResponse(url="/model-studio", status_code=303)
+        return RedirectResponse(url="/LLM-studio", status_code=303)
     if dashboard == "hermes":
         return RedirectResponse(url="/", status_code=303)
     raise HTTPException(status_code=400, detail="dashboard must be 'studio' or 'hermes'")
 
 
-@router.get("/api/model-studio/state")
-def model_studio_state(profile: Optional[str] = None):
+@router.get("/api/LLM-studio/state")
+def llm_studio_state(profile: Optional[str] = None):
     """Return editable routing metadata, never plaintext API credentials."""
     from hermes_cli.web_routers import config_env
 
@@ -129,7 +129,7 @@ def model_studio_state(profile: Optional[str] = None):
     return {"model": model, "providers": safe_providers}
 
 
-@router.put("/api/model-studio/custom-endpoint")
+@router.put("/api/LLM-studio/custom-endpoint")
 def save_custom_endpoint(body: CustomEndpointPayload, profile: Optional[str] = None):
     """Create/update a named custom provider with a user-selected environment-key name."""
     from hermes_cli.web_routers import config_env

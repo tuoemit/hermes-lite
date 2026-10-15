@@ -4,12 +4,16 @@
 # (/data/.hermes), and verify
 # the result. The pruned tree is flattened into a fresh stage by Dockerfile.
 #
-#   $1 = KEEP_BROWSER (1 = keep Playwright/Chromium, 0 = remove)
-#   $2 = KEEP_TUI    (1 = keep Node + the dashboard Chat tab TUI, 0 = remove)
+#   $1 = KEEP_BROWSER   (1 = keep Playwright/Chromium, 0 = remove; default 0)
+#   $2 = KEEP_TUI       (1 = keep Node + the dashboard Chat tab TUI, 0 = remove)
+#   $3 = KEEP_MEDIA     (1 = keep ffmpeg/ffprobe media processing, 0 = remove)
+#   $4 = KEEP_GOOGLE    (1 = keep the Google dependency stack, 0 = remove)
+#   $5 = KEEP_PHOTON    (1 = keep the Photon sidecar, 0 = remove)
+#   $6 = KEEP_CHANNELS  (space-separated channel ids to keep, or "all")
 #
-# Defaults preserve the feature set (KEEP_BROWSER=1, KEEP_TUI=1), matching the
-# Dockerfile. Pass 0 only when accepting the corresponding feature loss. KEEP_TUI
-# also controls Node/npm, which some platform plugins may require.
+# Defaults match the Dockerfile ARGs: the slim profile (no browser, no media
+# processing, no Google stack, no Photon, Discord + Telegram channels only).
+# KEEP_TUI also controls Node/npm, which some platform plugins may require.
 #
 # The image is pinned to a released Hermes version in Dockerfile. Keep the
 # hard-coded pruning rules aligned with that pinned release and update the
@@ -19,7 +23,7 @@ set -eu
 # Never leave bytecode behind, including from the verification imports below.
 export PYTHONDONTWRITEBYTECODE=1
 
-KEEP_BROWSER="${1:-1}"
+KEEP_BROWSER="${1:-0}"
 case "$KEEP_BROWSER" in
     0|1) ;;
     *)
@@ -37,22 +41,56 @@ case "$KEEP_TUI" in
         ;;
 esac
 
+KEEP_MEDIA="${3:-0}"
+case "$KEEP_MEDIA" in
+    0|1) ;;
+    *)
+        echo "ERROR: KEEP_MEDIA must be 0 or 1 (got '$KEEP_MEDIA')" >&2
+        exit 2
+        ;;
+esac
+
+KEEP_GOOGLE="${4:-0}"
+case "$KEEP_GOOGLE" in
+    0|1) ;;
+    *)
+        echo "ERROR: KEEP_GOOGLE must be 0 or 1 (got '$KEEP_GOOGLE')" >&2
+        exit 2
+        ;;
+esac
+
+KEEP_PHOTON="${5:-0}"
+case "$KEEP_PHOTON" in
+    0|1) ;;
+    *)
+        echo "ERROR: KEEP_PHOTON must be 0 or 1 (got '$KEEP_PHOTON')" >&2
+        exit 2
+        ;;
+esac
+
+# Space-separated messaging-channel ids (directory names under
+# /opt/hermes/plugins/platforms) to keep, or "all" for the complete upstream
+# channel set. Unselected adapters, their gateway-side files and their venv
+# dependencies are pruned; the gateway lazy-imports adapters only when a
+# platform is configured, so removal cannot break boot.
+KEEP_CHANNELS="${6:-discord telegram}"
+
 # --- Expected Hermes release -------------------------------------------------
 # Every anchored patch below matches the exact pinned release, so a version
 # bump must be detected once, clearly, rather than failing some arbitrary
 # patch in the middle of a prune (see the "Updating Hermes" section in the
 # README). Bump EXPECTED_HERMES_VERSION FIRST when changing HERMES_IMAGE, then
 # re-run the build and reconcile each patch against the new release.
-EXPECTED_HERMES_VERSION="v0.21.6"
-EXPECTED_HERMES_PY_VERSION="0.21.6"
+EXPECTED_HERMES_VERSION="v0.22.1"
+EXPECTED_HERMES_PY_VERSION="0.22.1"
 /opt/hermes/.venv/bin/python3 - "$EXPECTED_HERMES_VERSION" "$EXPECTED_HERMES_PY_VERSION" <<'PYBLOCK'
 import json, pathlib, sys
 
 want_tag, want_py = sys.argv[1], sys.argv[2]
 
-# Authoritative marker for the v0.21.x Docker images: /opt/hermes/install-stamp.json
-# (schemaVersion 2, "distribution": "docker", "displayVersion": "0.21.6").
-# Note: in v0.21.6 the older markers are placeholders and must NOT be trusted:
+# Authoritative marker for the v0.21.x/v0.22.x Docker images: /opt/hermes/install-stamp.json
+# (schemaVersion 2, "distribution": "docker", "displayVersion": "0.22.1").
+# Note: in v0.22.1 the older markers are placeholders and must NOT be trusted:
 #   - /etc/hermes/image-provenance.json reports "version": "0.0.0"
 #   - /opt/hermes/pyproject.toml reports version "0.0.0"
 stamp = pathlib.Path("/opt/hermes/install-stamp.json")
@@ -83,6 +121,17 @@ rm_group() {
 
 # --- Build caches ----------------------------------------------------------
 rm_group "uv wheel cache"        /root/.cache/uv
+# v0.22.x images seed a hermes-owned uv cache at the payload root (~400 MB,
+# archive-v0 dominated). It exists so `hermes pm` can run a warm
+# `uv sync --offline` when it (re)builds a dependency generation. This
+# template runs the sealed-container model (HERMES_DISABLE_LAZY_INSTALLS=1):
+# dependency environments are never rebuilt inside the running container
+# (see README — optional deps must be baked at build time), so the seed is
+# dead weight in the deployed image. Removing it cannot break boot: pm only
+# merges the seed when a uv sync actually runs, and a later explicit
+# `hermes pm repair` (already discouraged in the README) would simply take
+# the cold network path.
+rm_group "uv payload seed cache" /opt/hermes/uv-cache
 rm_group "npm/_npx cache"        /root/.npm
 rm_group "node compile cache"    /tmp/node-compile-cache
 
@@ -109,7 +158,7 @@ rm_group "ui-tui TS source" \
 # the exact feature set required by your deployment. Browser automation has its
 # own independent KEEP_BROWSER switch.
 if [ "$KEEP_TUI" = "0" ]; then
-    # v0.21.x keeps node/npm in the managed tool store; /usr/local/bin/{node,npm,npx}
+    # v0.21.x+ keeps node/npm in the managed tool store; /usr/local/bin/{node,npm,npx}
     # are symlinks into it, so remove both the links and the store trees.
     rm_group "node runtime (KEEP_TUI=0)" \
         /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx \
@@ -120,7 +169,7 @@ else
     echo "  KEPT: node + in-browser Chat tab TUI (KEEP_TUI=1)"
 fi
 
-# --- Managed tool store trims (v0.21.x) -------------------------------------
+# --- Managed tool store trims (v0.21.x layout, unchanged in v0.22.x) --------
 # /opt/hermes/tools is Hermes' managed toolchain: managed Python, ffmpeg/ffprobe,
 # ripgrep, uv, and (depending on KEEP_TUI / KEEP_BROWSER) node/npm and Chromium.
 # Hermes resolves these through HERMES_RUNTIME_DIR, so the directory itself stays.
@@ -133,6 +182,15 @@ fi
 #     disabled by HERMES_DISABLE_LAZY_INSTALLS=1).
 rm_group "ffplay (interactive player)" /opt/hermes/tools/ffmpeg-*/bin/ffplay
 rm_group "ffmpeg man/doc"              /opt/hermes/tools/ffmpeg-*/man /opt/hermes/tools/ffmpeg-*/doc
+
+# --- Media processing (KEEP_MEDIA) -------------------------------------------
+# ffmpeg/ffprobe (~279 MB) serve voice-note transcription, TTS delivery and
+# media transcoding on the messaging channels. KEEP_MEDIA=0 removes them
+# deliberately: channels stay fully usable for text and file attachments, but
+# voice notes are not transcribed and TTS audio is not rendered server-side.
+if [ "$KEEP_MEDIA" = "0" ]; then
+    rm_group "ffmpeg/ffprobe (KEEP_MEDIA=0)" /opt/hermes/tools/ffmpeg-*
+fi
 rm_group "managed python headers"      /opt/hermes/tools/python-*/include
 # Tk GUI stack (tkinter, _tkinter.so, Tcl/Tk libs, IDLE, turtledemo). Hermes never
 # imports tkinter; PIL.ImageTk and tqdm.tk import it lazily only if a caller asks.
@@ -156,11 +214,114 @@ rm_group "sanitizer runtimes (dev-only)" \
     /usr/lib/*-linux-gnu/libhwasan.so* /usr/lib/*-linux-gnu/liblsan.so* \
     /usr/lib/*-linux-gnu/libubsan.so*
 
-# --- Platform/integration preservation --------------------------------------
-# Deliberately do not remove messaging-platform plugins, adapters, bridge
-# scripts, or their sidecar dependencies here. Hermes' supported integration
-# surface is part of the default image contract. Reduce the set only via an
-# explicit, separately tested build profile—not by silently pruning adapters.
+# --- Channel selection (KEEP_CHANNELS) ---------------------------------------
+# The default ("all") preserves every messaging-platform plugin, adapter,
+# bridge script and sidecar — the upstream image contract. A space-separated
+# channel list prunes everything else: platform plugins, the gateway-side
+# adapter files for core-gateway channels, and (further below) their venv
+# dependencies. The gateway resolves adapters through a lazy
+# _BUILTIN_ADAPTERS/plugin-discovery import, so an unconfigured channel never
+# touches its module at boot — removal is safe for the remaining channels.
+has_channel() {
+    for _ch in $KEEP_CHANNELS; do
+        if [ "$_ch" = "$1" ]; then return 0; fi
+    done
+    return 1
+}
+# Channel-conditional removal helper: only ever called inside the
+# KEEP_CHANNELS != "all" / KEEP_PHOTON branches below (validate-template.sh
+# asserts it is never used for unconditional pruning, where rm_group rules
+# are forbidden from touching platform integrations).
+rm_channel_group() {
+    rm -rf "$@"
+    echo "  pruned: ${1##*/} et al. (channel selection)"
+}
+if [ "$KEEP_CHANNELS" != "all" ]; then
+    # Fail fast on unknown ids and on channels whose dependency stack is
+    # being pruned by another switch (silent breakage is worse than a build
+    # error).
+    for _ch in $KEEP_CHANNELS; do
+        if [ ! -d "/opt/hermes/plugins/platforms/$_ch" ]; then
+            echo "ERROR: KEEP_CHANNELS entry '$_ch' has no plugin under /opt/hermes/plugins/platforms" >&2
+            exit 2
+        fi
+    done
+    if [ "$KEEP_GOOGLE" = "0" ]; then
+        if has_channel google_chat; then
+            echo "ERROR: KEEP_CHANNELS includes google_chat but KEEP_GOOGLE=0 prunes its dependency stack." >&2
+            echo "       Build with KEEP_GOOGLE=1 or drop google_chat from KEEP_CHANNELS." >&2
+            exit 2
+        fi
+    fi
+    for _dir in /opt/hermes/plugins/platforms/*; do
+        [ -d "$_dir" ] || continue
+        _name=${_dir##*/}
+        if ! has_channel "$_name"; then
+            rm -rf "$_dir"
+            echo "  pruned: platform adapter '$_name' (KEEP_CHANNELS)"
+        fi
+    done
+    # Core-gateway adapter files for unselected channels. api_server (Hermes'
+    # own API/bot-chat platform), webhook infra and shared base modules stay.
+    if ! has_channel whatsapp; then
+        rm_channel_group \
+            /opt/hermes/gateway/platforms/whatsapp_common.py \
+            /opt/hermes/gateway/platforms/whatsapp_cloud.py \
+            /opt/hermes/scripts/whatsapp-bridge
+    fi
+    if ! has_channel signal; then
+        rm_channel_group \
+            /opt/hermes/gateway/platforms/signal.py \
+            /opt/hermes/gateway/platforms/signal_format.py \
+            /opt/hermes/gateway/platforms/signal_rate_limit.py
+    fi
+    if ! has_channel wecom; then
+        rm_channel_group /opt/hermes/gateway/platforms/weixin.py
+    fi
+    if ! has_channel yuanbao; then
+        rm_channel_group \
+            /opt/hermes/gateway/platforms/yuanbao.py \
+            /opt/hermes/gateway/platforms/yuanbao_media.py \
+            /opt/hermes/gateway/platforms/yuanbao_proto.py \
+            /opt/hermes/gateway/platforms/yuanbao_sticker.py
+    fi
+    if ! has_channel imessage; then
+        rm_channel_group /opt/hermes/gateway/platforms/bluebubbles.py
+    fi
+    if ! has_channel teams; then
+        rm_channel_group /opt/hermes/gateway/platforms/msgraph_webhook.py
+    fi
+fi
+
+# --- Photon sidecar (KEEP_PHOTON) ---------------------------------------------
+# Photon is the WhatsApp-adjacent hosted channel; its sidecar binary is the
+# single largest adapter asset (~114 MB). It is kept only when KEEP_PHOTON=1
+# AND photon is selected in KEEP_CHANNELS.
+if [ "$KEEP_PHOTON" = "0" ] || ! has_channel photon; then
+    if [ -d /opt/hermes/plugins/platforms/photon ]; then
+        rm_channel_group /opt/hermes/plugins/platforms/photon
+    fi
+fi
+
+# --- Removed plugins + tool backends (slim profile) ---------------------------
+# computer_use automates a host desktop GUI; there is no desktop in this
+# container, and its tool backend is only reachable through the plugin (the
+# boot modules import fine without tools/computer_use — verified). 
+# hermes-achievements is dashboard gamification. Neither is part of the
+# messaging/dashboard/documents/coding surface this profile targets.
+rm_group "computer_use plugin + tool backend" \
+    /opt/hermes/plugins/computer_use \
+    /opt/hermes/tools/computer_use \
+    /opt/hermes/tools/computer_use_tool.py
+rm_group "hermes-achievements plugin" /opt/hermes/plugins/hermes-achievements
+
+# --- macOS-only skills ---------------------------------------------------------
+# The apple category (apple-notes, apple-reminders, findmy, imessage) drives
+# macOS host apps and can never run inside a Linux container. stage2 syncs
+# bundled skills from /opt/hermes/skills on every boot, so removing the
+# category here is what keeps it out of ~/.hermes/skills. All other skills
+# are deliberately untouched.
+rm_group "macOS-only skills (apple category)" /opt/hermes/skills/apple
 
 # --- Build-time toolchain --------------------------------------------------
 # Native extensions are already built into the upstream venv, and the compiler
@@ -239,6 +400,19 @@ echo "  pruned: dev-only scripts (kept stage2 utils and whatsapp-bridge)"
 rm_group "apt lists"             /var/lib/apt/lists
 rm_group "docs/man/info"         /usr/share/doc /usr/share/man /usr/share/info
 rm_group "locales"               /usr/share/locale
+
+# --- perl ----------------------------------------------------------------------
+# Nothing in the boot chain (s6-overlay, stage2-hook, cont-init scripts) or in
+# Hermes itself uses perl, and core git neither links libperl nor ships
+# perl-dependent subcommands in this image (verified; the prune verification
+# below additionally does a live git init/commit probe). ~56 MB.
+rm_group "perl runtime" \
+    /usr/bin/perl /usr/bin/perl5.* /usr/bin/perlbug /usr/bin/perldoc \
+    /usr/bin/perlivp /usr/bin/perlthanks /usr/bin/pod2* \
+    "/usr/lib/${multiarch}"/libperl* \
+    "/usr/lib/${multiarch}"/perl* \
+    /usr/share/perl /usr/share/perl5.*
+
 rm_group "dev/CI leftovers" \
     /opt/hermes/evals /opt/hermes/tests-js /opt/hermes/contributors \
     /opt/hermes/mcp-research-data /opt/hermes/nix /opt/hermes/flake.nix \
@@ -250,7 +424,7 @@ rm_group "dev/CI leftovers" \
 if [ "$KEEP_BROWSER" = "1" ]; then
     echo "  KEPT: browser automation (KEEP_BROWSER=1)"
 else
-    # v0.21.x ships the pinned Chromium in the managed tool store
+    # v0.21.x+ ships the pinned Chromium in the managed tool store
     # (/opt/hermes/tools/chromium-<rev>, PLAYWRIGHT_BROWSERS_PATH=/opt/hermes/tools).
     # The legacy /opt/hermes/.playwright location is kept in the list for older
     # layouts; unmatched globs are harmless with rm -f semantics.
@@ -353,7 +527,7 @@ missing=$( {
     # lib-dynload, plus any bundled tool libraries).
     find /opt/hermes/.venv /opt/hermes/tools -type f -name '*.so*' -print0 2>/dev/null \
         | xargs -0 -r -n 200 ldd 2>/dev/null
-    # v0.21.x: rg and ffmpeg/ffprobe live in the managed tool store, not /usr/bin.
+    # v0.21.x+: rg and ffmpeg/ffprobe live in the managed tool store, not /usr/bin.
     ldd /opt/hermes/tools/ripgrep-*/rg /opt/hermes/tools/ffmpeg-*/bin/ffmpeg \
         /opt/hermes/tools/ffmpeg-*/bin/ffprobe /usr/bin/git 2>/dev/null
 } | grep -i "not found" || true)
@@ -382,7 +556,7 @@ find / -xdev -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || t
 # --- HOME for this template's data layout ----------------------------------
 # The official Hermes home is ~/.hermes, i.e. $HOME/.hermes. This template
 # keeps all state on the persistent volume at /data, so HOME is /data and the
-# Hermes home is /data/.hermes (= ~/.hermes). Upstream v0.21.6 hard-codes
+# Hermes home is /data/.hermes (= ~/.hermes). Upstream v0.21.6–v0.22.1 hard-codes
 # HOME=/opt/data in the dashboard s6 service and in the main program wrapper;
 # re-point both at /data. Left unpatched, HOME-anchored state (git config,
 # .netrc, provider SDK config, XDG state) would land in the non-persistent
@@ -476,26 +650,29 @@ if src.count(import_anchor) != 1 or src.count(include_anchor) != 1:
     raise SystemExit("ERROR: Hermes web_server route-mount anchors drifted; update LLMs Studio integration")
 src = src.replace(import_anchor,
                   "    shared_metrics as _shared_metrics_routes,\n"
-                  "    hermes_lite_model_studio as _hermes_lite_model_studio_routes,\n)", 1)
+                  "    LLM_studio as _LLM_studio_routes,\n)", 1)
 src = src.replace(include_anchor,
-                  include_anchor + "app.include_router(_hermes_lite_model_studio_routes.router)\n", 1)
+                  include_anchor + "app.include_router(_LLM_studio_routes.router)\n", 1)
 server.write_text(src, encoding="utf-8")
 
-page = Path("/opt/hermes/hermes_cli/web_dist/model-studio.html")
+page = Path("/opt/hermes/hermes_cli/web_dist/LLM-studio.html")
 if not page.is_file():
     raise SystemExit("ERROR: LLMs Studio HTML was not copied into the Hermes web_dist directory")
 index = Path("/opt/hermes/hermes_cli/web_dist/index.html")
 if not index.is_file():
     raise SystemExit("ERROR: upstream dashboard web_dist/index.html is missing")
 html = index.read_text(encoding="utf-8")
-marker = "<!-- hermes-lite-model-studio-link -->"
+marker = "<!-- hermes-lite-llm-studio-link -->"
 if marker not in html:
     if len(re.findall(r"</body>", html, flags=re.IGNORECASE)) != 1:
         raise SystemExit("ERROR: expected exactly one </body> in Hermes dashboard index.html")
-    link = '''\n<!-- hermes-lite-model-studio-link -->\n<style>#hermes-lite-model-studio-link{position:fixed;z-index:2147483000;right:calc(16px + env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:0 16px;border:1px solid #54472f;border-radius:999px;background:#14181d;color:#efd08f;font:600 13px/1.2 system-ui,sans-serif;text-decoration:none;box-shadow:0 8px 24px #0008;transition:border-color .16s,background .16s,transform .16s}#hermes-lite-model-studio-link:hover{background:#1c2025;border-color:#c7a467;transform:translateY(-1px)}#hermes-lite-model-studio-link:focus-visible{outline:2px solid #efd08f;outline-offset:3px}@media(max-width:600px){#hermes-lite-model-studio-link{right:calc(12px + env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));min-height:48px;padding:0 14px;font-size:12px}}@media(prefers-reduced-motion:reduce){#hermes-lite-model-studio-link{transition:none}}</style>\n<a id="hermes-lite-model-studio-link" href="/model-studio/switch?dashboard=studio" aria-label="Open Hermes LLMs Studio">✦ LLMs Studio</a>\n'''
+    # Minimal pill pinned to the top-right corner of the screen: no shadow,
+    # no vertical padding (the text line box is the only height), horizontal
+    # padding only. Safe-area insets keep it clear of notches/rounded corners.
+    link = '''\n<!-- hermes-lite-llm-studio-link -->\n<style>#hermes-lite-llm-studio-link{position:fixed;z-index:2147483000;top:calc(16px + env(safe-area-inset-top,0px));right:calc(16px + env(safe-area-inset-right,0px));display:inline-flex;align-items:center;gap:8px;padding:0 16px;border:1px solid #54472f;border-radius:999px;background:#14181d;color:#efd08f;font:600 13px/1.5 system-ui,sans-serif;text-decoration:none;transition:border-color .16s,background .16s}#hermes-lite-llm-studio-link:hover{background:#1c2025;border-color:#c7a467}#hermes-lite-llm-studio-link:focus-visible{outline:2px solid #efd08f;outline-offset:3px}@media(max-width:600px){#hermes-lite-llm-studio-link{top:calc(12px + env(safe-area-inset-top,0px));right:calc(12px + env(safe-area-inset-right,0px));padding:0 14px;font-size:12px}}@media(prefers-reduced-motion:reduce){#hermes-lite-llm-studio-link{transition:none}}</style>\n<a id="hermes-lite-llm-studio-link" href="/LLM-studio/switch?dashboard=studio" aria-label="Open Hermes LLMs Studio">✦ LLMs Studio</a>\n'''
     html = re.sub(r"</body>", link + "</body>", html, count=1, flags=re.IGNORECASE)
     index.write_text(html, encoding="utf-8")
-print("  mounted: /model-studio LLMs Studio page + dashboard switch handler and stock-dashboard link")
+print("  mounted: /LLM-studio LLMs Studio page + dashboard switch handler and stock-dashboard link")
 PY
 
 echo "prune verify: LLMs Studio route, static page, and dashboard-switch link installed"
@@ -520,7 +697,8 @@ ln -s /data /opt/data
 echo "  linked: /opt/data -> /data"
 
 # --- Dashboard/gateway child launches: run on the image venv, not the store ---
-# Upstream v0.21.6 defect in docker images: hermes_cli/_launchers.py::runtime_command
+# Upstream defect in the v0.21.x/v0.22.x docker images (verified: v0.21.6, v0.22.1):
+# hermes_cli/_launchers.py::runtime_command
 # starts every child process (dashboard doctor / security-audit / prompt-size /
 # backup, gateway lifecycle) on the managed store Python whenever the store records
 # one, which this image always does. A docker image records no committed dependency
@@ -620,14 +798,14 @@ grep -qF 'path.parts[1] in ("proc", "run")' "$_fsfiles" && grep -qF '"pairing", 
 echo "  hardened: file browser and spot editor deny /proc, /run and .dash (sensitive-path guard)"
 
 # --- Security repair / gate: known-vulnerable venv packages ------------------
-# The v0.21.6 frozen dependency set ships packages the dashboard security audit
-# flags. Each one is swapped for a pinned release, downloaded from PyPI and
-# verified against its SHA-256 before use. anyio is already fixed upstream
-# (4.14.2) and is gate-only.
+# The frozen dependency set ships packages the dashboard security audit flags.
+# Each one is swapped for a pinned release, downloaded from PyPI and verified
+# against its SHA-256 before use. httpx2, httpcore2 and anyio are already fixed
+# upstream since v0.22.0 (httpx2/httpcore2 2.12.0, anyio 4.14.2) and are
+# gate-only: the build fails closed if a future base image regresses below the
+# fixed release.
 #
 #   package     from      to        advisories addressed
-#   httpx2      2.7.0     2.12.0    GHSA-7mj9-2mp8-4m2p (HIGH), GHSA-8xx6-hgc6-gc2m (HIGH), MODERATE/UNKNOWN
-#   httpcore2   2.7.0     2.12.0    GHSA-7mj9-2mp8-4m2p (HIGH), PYSEC-2026-3844 (UNKNOWN)
 #   PyJWT       2.13.0    2.15.1    GHSA-ffc3-869f-jxw9 (CRITICAL), GHSA-9j54-fg26-wv3r, GHSA-9v7f-9g4p-ffgj,
 #                                   GHSA-p4g4-x82p-q773, GHSA-r6x4-923q-g947, GHSA-w2cx-738m-mc7w (HIGH), MODERATE/UNKNOWN
 #   tornado     6.5.8     6.5.10    GHSA-c2m8-h5v5-343r, GHSA-chx6-46f5-w4vp (HIGH), GHSA-3hv7-mjh2-fv65 (MODERATE)
@@ -636,9 +814,16 @@ echo "  hardened: file browser and spot editor deny /proc, /run and .dash (sensi
 #   multidict   6.7.1     6.9.1     GHSA-54p9-h82j-f925 (MODERATE)
 #   oauthlib    3.3.1     4.0.0     GHSA-hj66-6f7g-4r5v, GHSA-xpv3-w29h-x7cv (MODERATE), PYSEC-2026-4113/4114 (UNKNOWN)
 #
+# Gate-only (fixed upstream, must not regress):
+#   httpx2      >= 2.12.0           GHSA-7mj9-2mp8-4m2p (HIGH), GHSA-8xx6-hgc6-gc2m (HIGH) — swapped by this
+#                                   template for v0.21.6; shipped fixed from v0.22.0 on.
+#   httpcore2   >= 2.12.0           GHSA-7mj9-2mp8-4m2p (HIGH), PYSEC-2026-3844 (UNKNOWN) — same history.
+#   anyio       >= 4.14.2           already fixed in v0.21.6.
+#
 # NOTE: PyJWT 2.15.1 and oauthlib 4.0.0 are newer than the pins in upstream's
-# pyproject.toml (PyJWT==2.13.0). The build verifies the swapped set imports and
-# that the dashboard still starts; it does not rely on upstream's lock.
+# pyproject.toml (PyJWT==2.13.0, urllib3>=2.7.0,<3 — the urllib3 2.8.0 swap stays
+# inside that range). The build verifies the swapped set imports and that the
+# dashboard still starts; it does not rely on upstream's lock.
 #
 # Pure-Python wheels use one pinned file. Tornado and multidict ship compiled
 # extensions, so each has one pinned wheel per architecture (x86_64, aarch64).
@@ -664,16 +849,9 @@ SP = os.path.join(_lib, _pydirs[0], "site-packages")
 WHEEL_DIR = "/run/venv-wheels"
 
 # name -> (import module, vulnerable version to gate on, fixed version,
-#          {"any" | arch: (sha256, url)})   anyio is intentionally absent.
+#          {"any" | arch: (sha256, url)})   httpx2/httpcore2/anyio are
+#          intentionally absent: upstream ships them fixed (gate-only above).
 PINS = {
-    "httpx2": ("httpx2", "2.7.0", "2.12.0", {"any": (
-        "cc8b6eecb8661c146b8f89a60e97456ee086e91a784ed31ac450c3a9e613dd36",
-        "https://files.pythonhosted.org/packages/c8/95/411ba65569158e862368917aaf56597f3e5fa3b91b0502919638465a08f3/httpx2-2.12.0-py3-none-any.whl",
-    )}),
-    "httpcore2": ("httpcore2", "2.7.0", "2.12.0", {"any": (
-        "7e04258ce01013d7d615e5b910a3b27fac937d7a95038227e79652b4ba3b4ceb",
-        "https://files.pythonhosted.org/packages/d2/74/d370e55600d9bcfa0d9794b0166126d49291a3d2b20c268fc98c453a4948/httpcore2-2.12.0-py3-none-any.whl",
-    )}),
     "pyjwt": ("jwt", "2.13.0", "2.15.1", {"any": (
         "42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193",
         "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl",
@@ -723,17 +901,19 @@ for name, (mod, vuln, want, _variants) in PINS.items():
             f"this blocker targets the pinned Hermes release; reconcile it before pruning."
         )
 
-# anyio must already be the fixed release shipped upstream. If a future Hermes
-# downgrades it, fail closed rather than silently shipping a vulnerable anyio.
+# anyio, httpx2 and httpcore2 must already be the fixed releases shipped
+# upstream. If a future Hermes downgrades any of them, fail closed rather than
+# silently shipping a vulnerable version.
 def _ver(s):
     return tuple(int(p) for p in s.split(".")[:3] if p.isdigit())
-_anyio = installed.get("anyio")
-if _anyio is None or _ver(_anyio) < (4, 14, 2):
-    raise SystemExit(
-        f"venv-verify: 'anyio' is {_anyio!r}, need >= 4.14.2 (the fixed release). "
-        f"Reconcile the security gate before pruning."
-    )
-print(f"venv-verify: anyio {_anyio} already fixed upstream")
+for _name, _min in (("anyio", (4, 14, 2)), ("httpx2", (2, 12, 0)), ("httpcore2", (2, 12, 0))):
+    _got = installed.get(_name)
+    if _got is None or _ver(_got) < _min:
+        raise SystemExit(
+            f"venv-verify: '{_name}' is {_got!r}, need >= {'.'.join(map(str, _min))} (the fixed release). "
+            f"Reconcile the security gate before pruning."
+        )
+    print(f"venv-verify: {_name} {_got} already fixed upstream")
 
 def _pick(name, variants):
     if "any" in variants:
@@ -792,11 +972,161 @@ PYBLOCK
     exit 1
 }
 rm -rf /run/venv-wheels /run/venv-swap.py
-echo "  secured: venv packages upgraded to fixed releases (httpx2, httpcore2, PyJWT, tornado, urllib3, multidict, oauthlib; anyio already fixed upstream)"
+echo "  secured: venv packages upgraded to fixed releases (PyJWT, tornado, urllib3, multidict, oauthlib; httpx2, httpcore2 and anyio already fixed upstream)"
+
+# --- Venv slimming (sealed-container profile) ---------------------------------
+# Removes venv packages this deployment profile does not use. Every removal
+# was verified against v0.22.1 to be either lazily imported (provider adapters,
+# optional telemetry exporter, in-function channel imports) or gracefully
+# degrading (doctor reports "not installed", provider flows catch ImportError).
+# The import verification + dashboard smoke test below fail the build if any
+# boot-critical chain breaks.
+#
+# Unconditional for this profile:
+#   AWS/Bedrock stack:    boto3, botocore, s3transfer, jmespath
+#   Discord voice decode: davey (imported lazily inside the voice path only)
+#   OTLP telemetry:       opentelemetry* (only agent/monitoring/otlp_exporter,
+#                         activated only when observability is configured)
+#   Media extras:         youtube_transcript_api, resvg_py
+# Channel-tied (when that channel is not in KEEP_CHANNELS):
+#   matrix: mautrix, python_olm, unpaddedbase64, base58, asyncpg
+#   slack:  slack_sdk, slack_bolt
+#   teams/azure: azure.core/azure.identity, msal, msal_extensions (also
+#                disables the Azure Foundry model-provider auth flow)
+# Browser-tied (KEEP_BROWSER=0): cdp_use, fetch_use, browser_harness
+# Google stack (KEEP_GOOGLE=0): googleapiclient, the google/ namespace,
+#   grpcio, protobuf, proto_plus, httplib2, uritemplate, pyasn1(+modules),
+#   requests_oauthlib
+cat > /run/venv-slim.py <<'PYSLIM'
+import os
+import shutil
+import sys
+
+keep_browser, keep_google = sys.argv[1], sys.argv[2]
+channels = set(sys.argv[3:])
+
+_lib = "/opt/hermes/.venv/lib"
+_sp = os.path.join(_lib, os.listdir(_lib)[0], "site-packages")
+
+# dist-name (case-insensitive, matches <name>-*.dist-info) -> module dirs/files
+REMOVE = [
+    ("boto3", ["boto3"]),
+    ("botocore", ["botocore"]),
+    ("s3transfer", ["s3transfer"]),
+    ("jmespath", ["jmespath"]),
+    ("davey", ["davey"]),
+    ("opentelemetry_api", ["opentelemetry"]),
+    ("opentelemetry_sdk", []),
+    ("opentelemetry_proto", []),
+    ("opentelemetry_exporter_otlp_proto_common", []),
+    ("opentelemetry_exporter_otlp_proto_http", []),
+    ("opentelemetry_semantic_conventions", []),
+    ("youtube_transcript_api", ["youtube_transcript_api"]),
+    ("resvg_py", ["resvg_py"]),
+]
+if keep_browser == "0":
+    REMOVE += [
+        ("cdp_use", ["cdp_use"]),
+        ("fetch_use", ["fetch_use"]),
+        ("browser_harness", ["browser_harness"]),
+    ]
+if "matrix" not in channels:
+    REMOVE += [
+        ("mautrix", ["mautrix"]),
+        ("python_olm", ["olm"]),
+        ("unpaddedbase64", ["unpaddedbase64"]),
+        ("base58", ["base58"]),
+        ("asyncpg", ["asyncpg"]),
+    ]
+if "slack" not in channels:
+    REMOVE += [
+        ("slack_sdk", ["slack_sdk"]),
+        ("slack_bolt", ["slack_bolt"]),
+    ]
+if "teams" not in channels:
+    REMOVE += [
+        ("azure_core", ["azure"]),
+        ("azure_identity", []),
+        ("msal", ["msal"]),
+        ("msal_extensions", ["msal_extensions"]),
+    ]
+if keep_google == "0":
+    REMOVE += [
+        ("google_api_core", ["google"]),
+        ("google_api_python_client", ["googleapiclient"]),
+        ("google_auth", []),
+        ("google_auth_httplib2", []),
+        ("google_auth_oauthlib", ["google_auth_oauthlib"]),
+        ("google_cloud_pubsub", []),
+        ("googleapis_common_protos", []),
+        ("grpc_google_iam_v1", []),
+        ("grpcio", ["grpc"]),
+        ("grpcio_status", []),
+        ("proto_plus", ["proto"]),
+        ("protobuf", []),
+        ("httplib2", ["httplib2"]),
+        ("uritemplate", ["uritemplate"]),
+        ("pyasn1", ["pyasn1"]),
+        ("pyasn1_modules", ["pyasn1_modules"]),
+        ("requests_oauthlib", ["requests_oauthlib"]),
+    ]
+
+def du_mb():
+    total = 0
+    for root, dirs, files in os.walk(_sp):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total // (1024 * 1024)
+
+before_mb = du_mb()
+removed = []
+for name, modules in REMOVE:
+    hit = False
+    for entry in list(os.listdir(_sp)):
+        low = entry.lower()
+        if low == name or (
+            low.startswith(name.lower() + "-") and low.endswith(".dist-info")
+        ):
+            shutil.rmtree(os.path.join(_sp, entry), ignore_errors=True)
+            hit = True
+        elif low.startswith(name.lower() + ".") and low.endswith((".so", ".py")):
+            os.remove(os.path.join(_sp, entry))
+            hit = True
+    for m in modules:
+        p = os.path.join(_sp, m)
+        if os.path.lexists(p):
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+            hit = True
+    if hit:
+        removed.append(name)
+
+# If a namespace dir (google/, azure/) is now empty, drop it too.
+for ns in ("google", "azure"):
+    p = os.path.join(_sp, ns)
+    if os.path.isdir(p) and not os.listdir(p):
+        os.rmdir(p)
+
+after_mb = du_mb()
+print("venv-slim: removed " + ", ".join(removed))
+print(f"venv-slim: site-packages {before_mb} MB -> {after_mb} MB (-{before_mb - after_mb} MB)")
+PYSLIM
+
+/opt/hermes/.venv/bin/python3 /run/venv-slim.py "$KEEP_BROWSER" "$KEEP_GOOGLE" $KEEP_CHANNELS || {
+    echo "ERROR: venv slimming failed" >&2
+    exit 1
+}
+rm -f /run/venv-slim.py
+echo "  slimmed: unused venv packages removed (AWS/OTel/davey/yt/resvg + channel/browser/google-tied stacks)"
 
 
 after=$(du -sm / 2>/dev/null | cut -f1)
-echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER})"
+echo "prune: ${before}M -> ${after}M (browser=${KEEP_BROWSER}, tui=${KEEP_TUI}, media=${KEEP_MEDIA}, google=${KEEP_GOOGLE}, photon=${KEEP_PHOTON}, channels='${KEEP_CHANNELS}')"
 
 # --- Verify the pruned tree still works -----------------------------------
 # Use a throwaway HERMES_HOME so the root build user cannot create root-owned
@@ -809,6 +1139,7 @@ HERMES_DASHBOARD_FILES_ROOT=/ \
 HERMES_DASHBOARD_BASIC_AUTH_USERNAME=verify \
 HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=verify-password \
 KEEP_TUI="$KEEP_TUI" \
+KEEP_CHANNELS="$KEEP_CHANNELS" \
 /opt/hermes/.venv/bin/python3 - <<'PY'
 import importlib
 import os
@@ -838,24 +1169,36 @@ if os.environ.get("KEEP_TUI") == "1":
         "/opt/hermes/ui-tui/package.json",
     ]
 missing = [p for p in must if not pathlib.Path(p).exists()]
-# These are intentionally retained production integrations, not optional debris.
-for required_dir in (
-    "/opt/hermes/plugins/platforms/whatsapp",
-    "/opt/hermes/plugins/platforms/photon",
-):
-    if not pathlib.Path(required_dir).is_dir():
-        missing.append(required_dir)
-for required_file in (
-    "/opt/hermes/gateway/platforms/whatsapp_common.py",
-    "/opt/hermes/gateway/platforms/whatsapp_cloud.py",
-    "/opt/hermes/scripts/whatsapp-bridge",
-):
-    if not pathlib.Path(required_file).exists():
-        missing.append(required_file)
+
+# Kept channels: every selected platform plugin must still exist AND its
+# adapter module must import cleanly on the pruned venv (this is the guard
+# for the channel-tied venv removals above).
+channels = os.environ.get("KEEP_CHANNELS", "all").split()
+if channels != ["all"]:
+    for ch in channels:
+        if not pathlib.Path(f"/opt/hermes/plugins/platforms/{ch}").is_dir():
+            missing.append(f"plugins/platforms/{ch}")
+            continue
+        importlib.import_module(f"plugins.platforms.{ch}")
+        if pathlib.Path(f"/opt/hermes/plugins/platforms/{ch}/adapter.py").exists():
+            importlib.import_module(f"plugins.platforms.{ch}.adapter")
 if missing:
     sys.exit("prune broke the image, missing: " + ", ".join(missing))
-print("prune verify: imports, runtime assets, and retained platform integrations present")
+print("prune verify: imports, runtime assets, and kept platform adapters present")
 PY
+
+# git must keep working after the perl prune (git is C-only, but prove it live:
+# init + commit exercises the hook/Perl-free machinery end to end).
+GIT_PROBE_DIR=$(mktemp -d)
+if ! git -C "$GIT_PROBE_DIR" init -q \
+   || ! git -C "$GIT_PROBE_DIR" -c user.email=probe@invalid -c user.name=probe \
+        commit --allow-empty -q -m "perl-prune probe"; then
+    echo "ERROR: git broke after the perl prune (init/commit probe failed)" >&2
+    rm -rf "$GIT_PROBE_DIR"
+    exit 1
+fi
+rm -rf "$GIT_PROBE_DIR"
+echo "prune verify: git works without perl"
 
 # The dashboard Chat tab spawns the prebuilt TUI bundle. Prove the bundle is
 # loadable (every import resolves): with non-TTY stdin the entry evaluates the
